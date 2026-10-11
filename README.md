@@ -32,7 +32,7 @@ Research the checks are based on:
 | Check | What it looks for |
 | --- | --- |
 | S1 Repository setup | Security policy, private vulnerability reporting, licence, archive and fork status, open pull requests |
-| S2 Agent instruction files | CLAUDE.md, AGENTS.md, `.claude/`, `.mcp.json`, editor tasks that run on open, dev container commands |
+| S2 Agent instruction files | CLAUDE.md, AGENTS.md, GEMINI.md, `.claude/`, `.agents/`, `.gemini/`, `.mcp.json`, editor tasks that run on open, dev container commands. Cross-checks: whether CLAUDE.md, AGENTS.md and GEMINI.md in one folder match or point to each other, or give different agents different instructions. Redirects: `@` imports (including ones outside the repository or from a web address), symbolic links, files the instructions mention, renamed Gemini CLI instruction files, extra folders and endpoint changes in settings, and HTML comments GitHub hides. Files that instructions send an agent to are scanned too |
 | S3 Hidden Unicode | Bidirectional controls, tag characters and zero-width characters in file contents and names |
 | S4 GitHub Actions | `pull_request_target` checking out PR code, untrusted input inside `run:` steps, unpinned actions, broad permissions |
 | S5 Dependencies | Lockfiles checked against [OSV](https://osv.dev), plus the [OpenSSF Scorecard](https://scorecard.dev) result where one exists |

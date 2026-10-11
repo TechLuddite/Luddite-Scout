@@ -7,7 +7,7 @@ import { parseRepoInput } from '../js/lib/repo-url.js';
 import { parseJsonc, looksBinary, lineAt } from '../js/lib/text.js';
 import { scanText, reveal } from '../js/checks/unicode.js';
 import { analyzeWorkflow } from '../js/checks/workflows.js';
-import { analyzeAgentFile, classifyAgentPath } from '../js/checks/agents.js';
+import { analyzeAgentFile, classifyAgentPath, resolveRef, followTargets, crossCheckAgents } from '../js/checks/agents.js';
 import { classifyBuildPath, installScripts } from '../js/checks/build.js';
 import { findSecurityPolicy } from '../js/checks/setup.js';
 import { lockfileParser } from '../js/checks/lockfiles.js';
@@ -57,6 +57,20 @@ test('workflows', () => {
 test('agent files', () => {
   for (const c of cases.agent_path) assert.equal(classifyAgentPath(c.path)?.kind ?? null, c.kind, c.path);
   for (const c of cases.agent_file) assertFindings(analyzeAgentFile(c.path, text(c.text)), c);
+});
+
+const treeEntries = (rows) => rows.map(([path, type, mode]) => ({ path, type, ...(mode ? { mode } : {}) }));
+
+test('agent file cross-checks', () => {
+  for (const c of cases.agent_resolve) assert.equal(resolveRef(c.from, c.target).path ?? null, c.expect, `${c.from} -> ${c.target}`);
+  for (const c of cases.agent_follow) {
+    const byPath = new Map(treeEntries(c.entries).map((e) => [e.path, e]));
+    assert.deepEqual(followTargets(byPath, c.path, c.text, c.link).map((t) => [t.path, t.via]), c.expect, c.name);
+  }
+  for (const c of cases.agent_cross) {
+    const texts = new Map(Object.entries(c.texts).map(([k, v]) => [k, text(v)]));
+    assertFindings(crossCheckAgents(treeEntries(c.entries), texts, new Map(Object.entries(c.links)), c.extraNames || []), c);
+  }
 });
 
 test('build-time code', () => {

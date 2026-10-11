@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 ALLOWED_HOSTS = {"api.github.com", "raw.githubusercontent.com", "api.osv.dev", "api.securityscorecards.dev"}
 DEADLINE_SECONDS = 180
 API_MAX_BYTES = 8_000_000
@@ -469,8 +469,11 @@ AGENT_KINDS = [
     (r"(^|/)\.windsurfrules$", "Windsurf rules", "markdown", 0),
     (r"(^|/)\.clinerules(/|$)", "Cline rules", "markdown", 0),
     (r"(^|/)\.claude/settings(\.local)?\.json$", "Claude Code project settings", "claude-settings", 0),
-    (r"(^|/)\.claude/(agents|commands|skills|output-styles)/", "Claude Code agents, commands or skills", "markdown", 0),
+    (r"(^|/)\.claude/(agents|commands|skills|output-styles|rules)/", "Claude Code agents, commands, skills or rules", "markdown", 0),
     (r"(^|/)\.claude/", "Claude Code project files", "other", 0),
+    (r"(^|/)\.agents/", "Agent skills and files shared between tools", "markdown", 0),
+    (r"(^|/)\.gemini/settings\.json$", "Gemini CLI project settings", "gemini-settings", 0),
+    (r"(^|/)\.gemini/", "Gemini CLI project files", "other", 0),
     (r"(^|/)\.mcp\.json$", "MCP server config", "mcp", 0),
     (r"(^|/)\.cursor/mcp\.json$", "Cursor MCP server config", "mcp", 0),
     (r"(^|/)\.vscode/mcp\.json$", "VS Code MCP server config", "mcp", 0),
@@ -496,6 +499,149 @@ def classify_agent_path(path):
         if rx.search(path):
             return {"label": label, "kind": kind}
     return None
+
+
+def suspicious_lines(text):
+    out = []
+    for i, l in enumerate(re.split(r"\r?\n", text)):
+        for rx, why in SUSPICIOUS:
+            if rx.search(l):
+                out.append({"line": i + 1, "why": why, "text": truncate(l.strip(), 200)})
+    return out
+
+
+def resolve_ref(from_path, target):
+    """A path an agent file refers to, resolved from the file's own folder.
+    Returns {"outside": True} for home, absolute or climbing paths."""
+    if re.match(r"^(~|/|[A-Za-z]:[\\/]|\\\\)", target):
+        return {"outside": True}
+    parts = from_path.split("/")[:-1]
+    for p in target.split("/"):
+        if p in ("", "."):
+            continue
+        if p == "..":
+            if not parts:
+                return {"outside": True}
+            parts.pop()
+        else:
+            parts.append(p)
+    return {"path": "/".join(parts)}
+
+
+IMPORT_RE = re.compile(r"(?:^|\s)@((?:\\ |[^\s`'\"()<>\[\],;])+)")
+LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]+)")
+MENTION_RE = re.compile(r"(?:^|[\s(`\"'])((?:\.{1,2}/)?[\w./-]*\w\.(?:md|mdc|txt))(?![\w/])", re.I)
+URL_RE = re.compile(r"https?://[^\s)>\]\"'`]+")
+URL_CONTEXT = re.compile(r"(instruction|rules|guideline|prompt|fetch|follow|load|read)", re.I)
+
+
+def agent_refs(text):
+    """What a markdown instruction file points an agent at. Imports follow the
+    Claude Code and Gemini CLI rule: code spans and fenced blocks are skipped."""
+    out = {"imports": [], "remote": [], "links": [], "urls": [], "comments": []}
+    fence = None
+    in_comment = False
+    for i, raw in enumerate(re.split(r"\r?\n", text)):
+        line = i + 1
+        fm = re.match(r"^\s*(`{3,}|~{3,})", raw)
+        if fence:
+            if fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence):
+                fence = None
+            continue
+        if fm:
+            fence = fm.group(1)
+            continue
+        if in_comment:
+            if "-->" in raw:
+                in_comment = False
+        elif "<!--" in raw:
+            out["comments"].append({"line": line, "text": truncate(raw.strip(), 200)})
+            in_comment = "-->" not in raw[raw.rindex("<!--"):]
+        plain = re.sub(r"`[^`]*`", " ", raw)
+        for m in IMPORT_RE.finditer(plain):
+            target = re.sub(r"[.:!?]+$", "", m.group(1).replace("\\ ", " "))
+            if re.match(r"^[a-z][a-z0-9+.-]*://", target, re.I):
+                out["remote"].append({"line": line, "text": truncate("@" + target, 200)})
+            elif target:
+                out["imports"].append({"line": line, "target": target})
+        for m in LINK_RE.finditer(raw):
+            target = re.sub(r"[#?].*$", "", m.group(1))
+            if target and not re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I):
+                out["links"].append({"line": line, "target": target})
+        for m in MENTION_RE.finditer(raw):
+            out["links"].append({"line": line, "target": m.group(1)})
+        if URL_CONTEXT.search(raw):
+            for m in URL_RE.finditer(raw):
+                out["urls"].append({"line": line, "text": truncate(m.group(0), 200)})
+    return out
+
+
+def _is_outside(p):
+    return resolve_ref("x", str(p)).get("outside") is True
+
+
+def _ref_findings(text, followed_by_mention=False):
+    refs = agent_refs(text)
+    out = []
+    if refs["remote"]:
+        out.append({"severity": "medium", "title": "Imports instructions from a web address, which can change after this review",
+                    "samples": refs["remote"][:10]})
+    if followed_by_mention:
+        return out
+    outside = [r for r in refs["imports"] if _is_outside(r["target"])]
+    if outside:
+        out.append({"severity": "high", "title": "Imports a file from outside the repository, such as your home folder",
+                    "samples": [{"line": r["line"], "text": truncate("@" + r["target"], 200)} for r in outside[:10]]})
+    if refs["urls"]:
+        out.append({"severity": "low", "title": "Points the agent to instructions on the web, which can change after this review",
+                    "samples": refs["urls"][:10]})
+    if refs["comments"]:
+        n = len(refs["comments"])
+        out.append({"severity": "low", "title": f"Has {n} HTML comment{'s' if n > 1 else ''}, which GitHub hides when it shows the file. Some agents still read HTML comments.",
+                    "samples": refs["comments"][:10]})
+    return out
+
+
+def _mcp_findings(servers):
+    out = []
+    if not isinstance(servers, dict):
+        return out
+    for name, cfg in servers.items():
+        cfg = cfg if isinstance(cfg, dict) else {}
+        if cfg.get("command"):
+            out.append({"severity": "high", "title": f'MCP server "{truncate(name, 60)}" launches a local program',
+                        "detail": truncate(f"{cfg['command']} {command_text(cfg.get('args') or [])}", 240)})
+        elif cfg.get("url") or cfg.get("httpUrl"):
+            out.append({"severity": "medium", "title": f'MCP server "{truncate(name, 60)}" connects to a remote URL', "detail": truncate(str(cfg.get("url") or cfg.get("httpUrl")), 200)})
+    return out
+
+
+REDIRECT_ENV = re.compile(r"(_BASE_URL|_API_URL|_ENDPOINT|_PROXY|^NODE_OPTIONS|^NODE_TLS_REJECT_UNAUTHORIZED)$", re.I)
+
+
+def _directory_findings(dirs, tool):
+    items = [d for d in (dirs if isinstance(dirs, list) else [dirs]) if isinstance(d, str)]
+    if not items:
+        return []
+    outside = [d for d in items if _is_outside(d)]
+    if outside:
+        n = len(outside)
+        title = f"Gives {tool} access to {n} folder{'s' if n > 1 else ''} outside the repository"
+    else:
+        n = len(items)
+        title = f"Adds {n} folder{'s' if n > 1 else ''} to what {tool} reads"
+    return [{"severity": "high" if outside else "low", "title": title,
+             "samples": [{"text": truncate(d, 200)} for d in (outside or items)[:10]]}]
+
+
+def context_file_names(data):
+    """Gemini CLI lets a project rename its instruction file. Older versions
+    used contextFileName at the top level."""
+    if not isinstance(data, dict):
+        return []
+    ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
+    v = ctx.get("fileName", data.get("contextFileName"))
+    return [n for n in (v if isinstance(v, list) else [v]) if isinstance(n, str) and re.fullmatch(r"[\w.-]{1,100}", n)]
 
 
 def _hook_commands(hooks):
@@ -530,7 +676,10 @@ def analyze_agent_file(path, text):
     kind = info["kind"]
     d = data or {}
 
-    if kind in ("markdown", "other"):
+    if kind == "markdown":
+        findings.append({"severity": "info", "title": f"{info['label']}: an agent reads this as guidance"})
+        findings.extend(_ref_findings(text))
+    elif kind == "other":
         findings.append({"severity": "info", "title": f"{info['label']}: an agent reads this as guidance"})
     elif kind == "claude-settings":
         if d.get("hooks"):
@@ -552,6 +701,13 @@ def analyze_agent_file(path, text):
             findings.append({"severity": "medium" if bash else "low",
                              "title": f"Pre-approves {n} tool permission{'s' if n > 1 else ''}" + (f", {len(bash)} for shell commands" if bash else ""),
                              "samples": [{"text": truncate(p, 200)} for p in allow[:10]]})
+        if perms.get("additionalDirectories"):
+            findings.extend(_directory_findings(perms["additionalDirectories"], "Claude Code"))
+        env = d.get("env") if isinstance(d.get("env"), dict) else {}
+        keys = [k for k in env if REDIRECT_ENV.search(k)]
+        if keys:
+            findings.append({"severity": "high", "title": "Sets environment variables that change where Claude Code sends requests or how it runs",
+                             "samples": [{"text": truncate(f"{k}={command_text(env[k])}", 200)} for k in keys[:10]]})
         mode = perms.get("defaultMode")
         if mode and mode != "default":
             findings.append({"severity": "high", "title": f"Sets the default permission mode to {truncate(mode, 40)}"})
@@ -561,17 +717,22 @@ def analyze_agent_file(path, text):
         servers = d.get("mcpServers") or d.get("servers") or {}
         if not isinstance(servers, dict):
             servers = {}
-        for name, cfg in servers.items():
-            cfg = cfg if isinstance(cfg, dict) else {}
-            if cfg.get("command"):
-                findings.append({"severity": "high", "title": f'MCP server "{truncate(name, 60)}" launches a local program',
-                                 "detail": truncate(f"{cfg['command']} {command_text(cfg.get('args') or [])}", 240)})
-            elif cfg.get("url"):
-                findings.append({"severity": "medium", "title": f'MCP server "{truncate(name, 60)}" connects to a remote URL', "detail": truncate(cfg["url"], 200)})
+        findings.extend(_mcp_findings(servers))
         if data is None:
             findings.append({"severity": "medium", "title": "MCP config that could not be parsed. Review it by hand."})
         elif not servers:
             findings.append({"severity": "info", "title": "MCP config with no servers listed"})
+    elif kind == "gemini-settings":
+        names = context_file_names(d)
+        if names:
+            findings.append({"severity": "low", "title": f"Tells Gemini CLI to read {', '.join(names)} as its instructions"})
+        ctx = d.get("context") if isinstance(d.get("context"), dict) else {}
+        dirs = ctx.get("includeDirectories", d.get("includeDirectories"))
+        if dirs:
+            findings.extend(_directory_findings(dirs, "Gemini CLI"))
+        findings.extend(_mcp_findings(d.get("mcpServers") or {}))
+        if data is None:
+            findings.append({"severity": "medium", "title": "Gemini CLI settings file that could not be parsed. Review it by hand."})
     elif kind == "vscode-tasks":
         tasks = d.get("tasks") if isinstance(d.get("tasks"), list) else []
         on_open = [t for t in tasks if isinstance(t, dict) and isinstance(t.get("runOptions"), dict) and t["runOptions"].get("runOn") == "folderOpen"]
@@ -593,33 +754,233 @@ def analyze_agent_file(path, text):
             if d.get(key):
                 findings.append({"severity": "medium", "title": f"{key} runs inside the container", "detail": truncate(command_text(d[key]), 240)})
 
-    for i, l in enumerate(re.split(r"\r?\n", text)):
-        for rx, why in SUSPICIOUS:
-            if rx.search(l):
-                findings.append({"severity": "medium", "title": why, "line": i + 1, "snippet": truncate(l.strip(), 200)})
+    for s in suspicious_lines(text):
+        findings.append({"severity": "medium", "title": s["why"], "line": s["line"], "snippet": s["text"]})
+    return findings
+
+
+TEXT_REF = re.compile(r"\.(md|mdc|txt)$", re.I)
+MAX_FOLLOW = 50
+MAX_IMPORT_DEPTH = 4
+VIA_TEXT = {"import": "an import", "link": "a symbolic link", "mention": "a mention"}
+
+
+def _is_symlink(e):
+    return bool(e) and e.get("mode") == "120000"
+
+
+def follow_targets(by_path, path, text, is_link):
+    """Files an agent is sent to by one instruction file: its imports and the
+    instruction files it links or mentions, or the target of a symbolic link."""
+    out = []
+
+    def add(p, via):
+        e = by_path.get(p)
+        if e and e["type"] == "blob":
+            out.append({"path": p, "via": via})
+        elif e and e["type"] == "tree":
+            for q, f in by_path.items():
+                if f["type"] == "blob" and q.startswith(p + "/") and len(out) < MAX_FOLLOW:
+                    out.append({"path": q, "via": via})
+
+    if is_link:
+        r = resolve_ref(path, text.strip())
+        if r.get("path"):
+            add(r["path"], "link")
+        return out
+    refs = agent_refs(text)
+    for r in refs["imports"]:
+        t = resolve_ref(path, r["target"])
+        if t.get("path"):
+            add(t["path"], "import")
+    for r in refs["links"]:
+        if not TEXT_REF.search(r["target"]):
+            continue
+        near = resolve_ref(path, r["target"])
+        root = resolve_ref("x", r["target"])
+        if near.get("path") and near["path"] in by_path:
+            add(near["path"], "mention")
+        elif root.get("path"):
+            add(root["path"], "mention")
+    return out
+
+
+def _base_name(p):
+    return p.rsplit("/", 1)[-1]
+
+
+def _pair_dir(p):
+    d = p.rsplit("/", 1)[0] if "/" in p else ""
+    if d == ".claude":
+        return ""
+    return d[:-8] if d.endswith("/.claude") else d
+
+
+def _line_set(text):
+    return {l.strip() for l in re.split(r"\r?\n", text) if l.strip()}
+
+
+def _refers_to(by_path, src, text, dst):
+    return any(t["path"] == dst for t in follow_targets(by_path, src, text, False))
+
+
+def cross_check_agents(entries, texts, links, extra_names=()):
+    """Checks across instruction files: symbolic links, imports of files that
+    are missing, and CLAUDE.md, AGENTS.md and GEMINI.md in one folder that
+    differ. texts maps each file read to its text, and links maps each
+    symbolic link to its target."""
+    by_path = {e["path"]: e for e in entries}
+    findings = []
+
+    for path, target in links.items():
+        r = resolve_ref(path, target)
+        e = by_path.get(r.get("path")) if r.get("path") else None
+        if r.get("outside"):
+            findings.append({"severity": "high", "title": f"Is a link to {truncate(target, 200)}, outside the repository", "path": path})
+        elif e:
+            findings.append({"severity": "info", "title": f"Is a link to {'the folder ' if e['type'] == 'tree' else ''}{r['path']}", "path": path})
+        else:
+            findings.append({"severity": "low", "title": f"Is a link to {truncate(r['path'], 200)}, which is not in the repository", "path": path})
+
+    for path, text in texts.items():
+        if path in links:
+            continue
+        missing = []
+        for r in agent_refs(text)["imports"]:
+            to = resolve_ref(path, r["target"])
+            if to.get("path") and to["path"] not in by_path and re.search(r"\.\w{1,8}$", to["path"]):
+                missing.append(r)
+        if missing:
+            n = len(missing)
+            findings.append({"severity": "low",
+                             "title": f"Imports {n} files that are not in the repository, so something else must create them" if n > 1
+                             else "Imports a file that is not in the repository, so something else must create it",
+                             "path": path, "samples": [{"line": r["line"], "text": truncate("@" + r["target"], 200)} for r in missing[:10]]})
+
+    names = {"claude.md", "agents.md", "gemini.md", *(n.lower() for n in extra_names)}
+    groups = {}
+    for path in texts:
+        if _base_name(path).lower() in names:
+            groups.setdefault(_pair_dir(path), []).append(path)
+
+    def effective(p):
+        if p not in links:
+            return p, texts[p]
+        r = resolve_ref(p, links[p])
+        return (r["path"], texts[r["path"]]) if r.get("path") in texts else None
+
+    for group in groups.values():
+        group.sort()
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                ea, eb = effective(a), effective(b)
+                if not ea or not eb or ea[0] == eb[0]:
+                    continue
+                la, lb = _line_set(ea[1]), _line_set(eb[1])
+                a_only, b_only = len(la - lb), len(lb - la)
+                sa, sb = bool(suspicious_lines(ea[1])), bool(suspicious_lines(eb[1]))
+                if sa != sb:
+                    flagged, clean = (a, b) if sa else (b, a)
+                    findings.append({"severity": "medium", "path": flagged,
+                                     "title": f"Only {flagged} has lines flagged by this check, so an agent that reads {clean} instead is given different instructions"})
+                if not a_only and not b_only:
+                    findings.append({"severity": "info", "title": f"{a} and {b} give the same instructions", "path": a})
+                    continue
+                ab = _refers_to(by_path, ea[0], ea[1], eb[0])
+                ba = _refers_to(by_path, eb[0], eb[1], ea[0])
+                # When each names the other, the shorter one is the pointer.
+                a_first = ab and (not ba or len(la) <= len(lb))
+                if ab or ba:
+                    src, dst, lf, lt = (a, b, la, lb) if a_first else (b, a, lb, la)
+                    to_name = _base_name(eb[0] if a_first else ea[0])
+                    own = len([l for l in lf if l not in lt and to_name not in l])
+                    findings.append({"severity": "info", "path": src,
+                                     "title": f"{src} points to {dst}" + (f", and adds {own} lines of its own" if own > 1 else "")})
+                else:
+                    findings.append({"severity": "low", "path": a,
+                                     "title": f"{a} and {b} differ, and neither points to the other. Different agents read different files, so review both.",
+                                     "detail": f"{a_only} line{'' if a_only == 1 else 's'} only in {a}, {b_only} only in {b}."})
     return findings
 
 
 def run_agents(ctx):
+    by_path = {e["path"]: e for e in ctx.entries}
     files = [e for e in ctx.entries if e["type"] == "blob" and classify_agent_path(e["path"])]
     if not files:
         return {"status": "partial" if ctx.truncated else "ran", "notes": ["No agent instruction, editor task or dev container files found."], "findings": []}
-    findings, unread = [], 0
+    findings, texts, links, extra_names, queue = [], {}, {}, [], []
+    unread = 0
     for path, res in ctx.fetch_many([f["path"] for f in files[:200]]):
-        label = classify_agent_path(path)["label"]
+        info = classify_agent_path(path)
         if "text" not in res:
             unread += 1
-            findings.append({"severity": "medium", "title": f"{label}: could not be read ({res['skipped']}). Review it by hand.", "path": path})
+            findings.append({"severity": "medium", "title": f"{info['label']}: could not be read ({res['skipped']}). Review it by hand.", "path": path})
             continue
+        if _is_symlink(by_path.get(path)):
+            links[path] = res["text"].strip()
+            queue += [{**t, "from": path, "depth": 1} for t in follow_targets(by_path, path, res["text"], True)]
+            continue
+        texts[path] = res["text"]
         for f in analyze_agent_file(path, res["text"]):
             findings.append({**f, "path": path})
+        if info["kind"] == "markdown":
+            queue += [{**t, "from": path, "depth": 1} for t in follow_targets(by_path, path, res["text"], False)]
+        if info["kind"] == "gemini-settings":
+            try:
+                extra_names += context_file_names(parse_jsonc(res["text"]))
+            except (ValueError, IndexError):
+                pass
+
+    # Files the instruction files send an agent to are instructions as well.
+    followed, capped = set(), False
+    while queue:
+        batch = []
+        for q in queue:
+            if q["path"] in texts or q["path"] in links or q["path"] in followed or classify_agent_path(q["path"]):
+                continue
+            if len(followed) >= MAX_FOLLOW:
+                capped = True
+                break
+            followed.add(q["path"])
+            batch.append(q)
+        queue = []
+        got = dict(ctx.fetch_many([q["path"] for q in batch]))
+        for q in batch:
+            res = got.get(q["path"]) or {}
+            how = VIA_TEXT[q["via"]]
+            if "text" not in res:
+                unread += 1
+                findings.append({"severity": "medium", "path": q["path"],
+                                 "title": f"Read by agents through {how} in {q['from']}, but could not be read ({res.get('skipped')}). Review it by hand."})
+                continue
+            if _is_symlink(by_path.get(q["path"])):
+                links[q["path"]] = res["text"].strip()
+                queue += [{**t, "from": q["path"], "depth": q["depth"] + 1} for t in follow_targets(by_path, q["path"], res["text"], True)]
+                continue
+            texts[q["path"]] = res["text"]
+            findings.append({"severity": "info", "title": f"Read by agents through {how} in {q['from']}", "path": q["path"]})
+            for s in suspicious_lines(res["text"]):
+                findings.append({"severity": "medium", "title": s["why"], "line": s["line"], "snippet": s["text"], "path": q["path"]})
+            for f in _ref_findings(res["text"], q["via"] == "mention"):
+                findings.append({**f, "path": q["path"]})
+            if q["via"] != "mention" and q["depth"] < MAX_IMPORT_DEPTH:
+                queue += [{**t, "from": q["path"], "depth": q["depth"] + 1}
+                          for t in follow_targets(by_path, q["path"], res["text"], False) if t["via"] == "import"]
+
+    findings += cross_check_agents(ctx.entries, texts, links, extra_names)
+
     n = len(files)
     notes = [f"Found {n} file{'s' if n > 1 else ''}."]
+    if followed:
+        notes.append(f"Followed {len(followed)} more file{'s' if len(followed) > 1 else ''} that instruction files import, link or mention.")
+    if capped:
+        notes.append(f"Stopped following references after {MAX_FOLLOW} files.")
     if n > 200:
         notes.append("Only the first 200 were read.")
     if ctx.truncated:
         notes.append("The file list from GitHub was truncated, so some files may be missing.")
-    return {"status": "partial" if unread or n > 200 or ctx.truncated else "ran", "notes": notes, "findings": findings}
+    return {"status": "partial" if unread or capped or n > 200 or ctx.truncated else "ran", "notes": notes, "findings": findings}
 
 
 # ---------------------------------------------------------------- S6 build

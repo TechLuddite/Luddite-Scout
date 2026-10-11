@@ -22,7 +22,7 @@
     <p>Luddite Scout reads a public GitHub repository and reports what a careful person would want to know before pointing a coding agent at it, or building it:</p>
     <ul>
       <li><strong>S1 Repository setup.</strong> Security policy, private vulnerability reporting, licence, archive and fork status, open pull requests.</li>
-      <li><strong>S2 Agent instruction files.</strong> Files such as CLAUDE.md, AGENTS.md, .claude/, .mcp.json, editor tasks and dev container config that an agent or editor may read or execute.</li>
+      <li><strong>S2 Agent instruction files.</strong> Files such as CLAUDE.md, AGENTS.md, GEMINI.md, .claude/, .agents/, .mcp.json, editor tasks and dev container config that an agent or editor may read or execute. It also follows where these files send an agent: <code>@</code> imports, symbolic links and mentioned files are read and scanned too, and imports from outside the repository or from a web address are flagged. When CLAUDE.md, AGENTS.md and GEMINI.md sit in one folder, it says whether they match, whether one points to another, or whether different agents would get different instructions.</li>
       <li><strong>S3 Hidden Unicode.</strong> Bidirectional controls, tag characters and zero-width characters that hide text from a human reviewer.</li>
       <li><strong>S4 GitHub Actions.</strong> Risky trigger and checkout combinations, untrusted input inside shell steps, unpinned actions, broad permissions.</li>
       <li><strong>S5 Dependencies.</strong> Lockfiles checked against the OSV advisory database, plus the OpenSSF Scorecard result where one exists.</li>

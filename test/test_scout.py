@@ -65,6 +65,19 @@ class SharedCases(unittest.TestCase):
         for c in CASES["agent_file"]:
             self.assert_findings(scout.analyze_agent_file(c["path"], text(c["text"])), c)
 
+    def test_agent_cross_checks(self):
+        def tree(rows):
+            return [{"path": r[0], "type": r[1], **({"mode": r[2]} if len(r) > 2 else {})} for r in rows]
+        for c in CASES["agent_resolve"]:
+            self.assertEqual(scout.resolve_ref(c["from"], c["target"]).get("path"), c["expect"], f'{c["from"]} -> {c["target"]}')
+        for c in CASES["agent_follow"]:
+            by_path = {e["path"]: e for e in tree(c["entries"])}
+            got = [[t["path"], t["via"]] for t in scout.follow_targets(by_path, c["path"], c["text"], c["link"])]
+            self.assertEqual(got, c["expect"], c["name"])
+        for c in CASES["agent_cross"]:
+            texts = {k: text(v) for k, v in c["texts"].items()}
+            self.assert_findings(scout.cross_check_agents(tree(c["entries"]), texts, c["links"], c.get("extraNames", [])), c)
+
     def test_build(self):
         for c in CASES["build_path"]:
             got = scout.classify_build_path(c["path"])
