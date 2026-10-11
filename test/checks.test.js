@@ -11,6 +11,7 @@ import { analyzeAgentFile, classifyAgentPath, resolveRef, followTargets, crossCh
 import { classifyBuildPath, installScripts } from '../js/checks/build.js';
 import { findSecurityPolicy } from '../js/checks/setup.js';
 import { lockfileParser } from '../js/checks/lockfiles.js';
+import { advisoryFindings } from '../js/checks/deps.js';
 import { readManifest, analyzePluginFile, analyzePluginTree } from '../js/checks/omarchy.js';
 
 const cases = JSON.parse(readFileSync(new URL('./fixtures/cases.json', import.meta.url), 'utf8'));
@@ -123,4 +124,14 @@ test('no hidden characters in this repository', async () => {
     .filter((p) => scanText(readFileSync(p, 'utf8')))
     .map((p) => p.slice(root.length));
   assert.deepEqual(hits, []);
+});
+
+test('advisories', () => {
+  for (const c of cases.advisories) {
+    const [f] = advisoryFindings([c.hit], new Map(Object.entries(c.details)));
+    assert.equal(f.title, c.expect.title, c.name);
+    assert.equal(f.severity, c.expect.severity, c.name);
+    assert.deepEqual(f.samples.map((s) => s.osv), c.expect.samples, c.name);
+    if (c.expect.texts) assert.deepEqual(f.samples.map((s) => s.text), c.expect.texts, c.name);
+  }
 });

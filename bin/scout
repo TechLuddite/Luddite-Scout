@@ -1308,6 +1308,7 @@ def lockfile_parser(path):
 # ------------------------------------------------------------ S5 deps
 
 def _osv_severity(v):
+    """The record's own severity, or None when it does not give one."""
     s = str(((v or {}).get("database_specific") or {}).get("severity") or "").lower()
     if s in ("critical", "high"):
         return "high"
@@ -1315,7 +1316,51 @@ def _osv_severity(v):
         return "medium"
     if s == "low":
         return "low"
-    return "medium"
+    return None
+
+
+def advisory_findings(hits, details):
+    """One finding per package. IDs that alias each other (either record lists
+    the other) are one advisory: counted once, shown once, scored as the worst
+    severity any member states, or medium when none states one. An ID without
+    fetched details joins a group only when a fetched member lists it.
+    `details` maps an ID to its OSV record."""
+    order = ["high", "medium", "low"]
+    findings = []
+    for h in hits:
+        parent = {i: i for i in h["ids"]}
+
+        def find(i):
+            while parent[i] != i:
+                i = parent[i]
+            return i
+        for vid in h["ids"]:
+            for a in (details.get(vid) or {}).get("aliases") or []:
+                if a in parent:
+                    parent[find(a)] = find(vid)
+        groups = {}
+        for vid in h["ids"]:
+            groups.setdefault(find(vid), []).append(vid)
+        advisories = []
+        for members in groups.values():
+            vid = next((m for m in members if m.startswith("GHSA-")), members[0])
+            v = details.get(vid) or {}
+            aliases = [a for a in dict.fromkeys(members + list(v.get("aliases") or [])) if a != vid]
+            known = [s for s in (_osv_severity(details.get(m)) for m in members) if s]
+            severity = min(known, key=order.index) if known else "medium"
+            summary = v.get("summary") or next(((details.get(m) or {}).get("summary") for m in members if (details.get(m) or {}).get("summary")), None)
+            advisories.append({"id": vid, "aliases": aliases, "severity": severity, "summary": summary})
+        worst = min((a["severity"] for a in advisories), key=order.index, default="low")
+        p = h["pkg"]
+        n = len(advisories)
+        samples = []
+        for a in advisories[:8]:
+            text = a["id"] + (f" ({', '.join(a['aliases'][:3])})" if a["aliases"] else "") + (f": {a['summary']}" if a["summary"] else "")
+            samples.append({"text": truncate(text, 300), "osv": a["id"]})
+        findings.append({"severity": worst,
+                         "title": f"{p['name']} {p['version']} ({p['ecosystem']}): {n}{'+' if h['more'] else ''} known advisor{'y' if n == 1 else 'ies'}",
+                         "path": p["paths"][0], "samples": samples})
+    return findings
 
 
 def fetch_scorecard(net, owner, repo):
@@ -1391,24 +1436,7 @@ def run_deps(ctx):
     if len(ids) > 60:
         notes.append(f"{len(ids)} advisories matched. Details were fetched for the first 60.")
 
-    order = ["high", "medium", "low"]
-    for h in hits:
-        worst = "low"
-        for vid in h["ids"]:
-            s = _osv_severity(details.get(vid)) if details.get(vid) else "medium"
-            if order.index(s) < order.index(worst):
-                worst = s
-        p = h["pkg"]
-        n = len(h["ids"])
-        samples = []
-        for vid in h["ids"][:8]:
-            v = details.get(vid) or {}
-            aliases = v.get("aliases") or []
-            text = vid + (f" ({', '.join(aliases[:3])})" if aliases else "") + (f": {v['summary']}" if v.get("summary") else "")
-            samples.append({"text": truncate(text, 300), "osv": vid})
-        findings.append({"severity": worst,
-                         "title": f"{p['name']} {p['version']} ({p['ecosystem']}): {n}{'+' if h['more'] else ''} known advisor{'y' if n == 1 else 'ies'}",
-                         "path": p["paths"][0], "samples": samples})
+    findings.extend(advisory_findings(hits, details))
     if ctx.truncated:
         notes.append("The file list from GitHub was truncated, so some lockfiles may be missing.")
     return {"status": "partial" if osv_failed or unreadable or ctx.truncated else "ran", "notes": notes, "findings": findings, "scorecard": scorecard}

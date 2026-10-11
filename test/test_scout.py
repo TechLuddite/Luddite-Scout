@@ -99,6 +99,15 @@ class SharedCases(unittest.TestCase):
             got = [f'{p["ecosystem"]}|{p["name"]}|{p["version"]}' for p in parse(text(c["text"]))]
             self.assertEqual(got, c["expect"], c["path"])
 
+    def test_advisories(self):
+        for c in CASES["advisories"]:
+            f = scout.advisory_findings([c["hit"]], c["details"])[0]
+            self.assertEqual(f["title"], c["expect"]["title"], c["name"])
+            self.assertEqual(f["severity"], c["expect"]["severity"], c["name"])
+            self.assertEqual([s["osv"] for s in f["samples"]], c["expect"]["samples"], c["name"])
+            if "texts" in c["expect"]:
+                self.assertEqual([s["text"] for s in f["samples"]], c["expect"]["texts"], c["name"])
+
     def test_omarchy_plugin(self):
         for c in CASES["plugin_manifest"]:
             self.assertEqual(bool(scout.read_manifest(c["text"])), c["plugin"], c["text"])

@@ -21,12 +21,60 @@ async function osvVuln(id) {
   return res.ok ? res.json() : null;
 }
 
+// The record's own severity, or null when it does not give one.
 function severityOf(vuln) {
   const s = String(vuln?.database_specific?.severity || '').toLowerCase();
   if (s === 'critical' || s === 'high') return 'high';
   if (s === 'moderate' || s === 'medium') return 'medium';
   if (s === 'low') return 'low';
-  return 'medium';
+  return null;
+}
+
+const ORDER = ['high', 'medium', 'low'];
+
+// One finding per package. IDs that alias each other (either record lists the
+// other) are one advisory: counted once, shown once, scored as the worst
+// severity any member states, or medium when none states one. An ID without
+// fetched details joins a group only when a fetched member lists it. `details`
+// maps an ID to its OSV record.
+export function advisoryFindings(hits, details) {
+  const findings = [];
+  for (const h of hits) {
+    const parent = new Map(h.ids.map((id) => [id, id]));
+    const find = (id) => (parent.get(id) === id ? id : find(parent.get(id)));
+    for (const id of h.ids) {
+      for (const a of details.get(id)?.aliases || []) {
+        if (parent.has(a)) parent.set(find(a), find(id));
+      }
+    }
+    const groups = new Map();
+    for (const id of h.ids) {
+      const root = find(id);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(id);
+    }
+    const advisories = [...groups.values()].map((members) => {
+      const id = members.find((m) => m.startsWith('GHSA-')) || members[0];
+      const v = details.get(id);
+      const aliases = [...new Set([...members, ...(v?.aliases || [])])].filter((a) => a !== id);
+      const known = members.map((m) => severityOf(details.get(m))).filter(Boolean);
+      const severity = known.length ? known.reduce((a, b) => (ORDER.indexOf(b) < ORDER.indexOf(a) ? b : a)) : 'medium';
+      const summary = v?.summary || members.map((m) => details.get(m)?.summary).find(Boolean);
+      return { id, aliases, severity, summary };
+    });
+    const worst = advisories.reduce((acc, a) => (ORDER.indexOf(a.severity) < ORDER.indexOf(acc) ? a.severity : acc), 'low');
+    const n = advisories.length;
+    findings.push({
+      severity: worst,
+      title: `${h.pkg.name} ${h.pkg.version} (${h.pkg.ecosystem}): ${n}${h.more ? '+' : ''} known advisor${n === 1 ? 'y' : 'ies'}`,
+      path: [...h.pkg.paths][0],
+      samples: advisories.slice(0, 8).map((a) => ({
+        text: `${a.id}${a.aliases.length ? ` (${a.aliases.slice(0, 3).join(', ')})` : ''}${a.summary ? `: ${a.summary}` : ''}`,
+        osv: a.id,
+      })),
+    });
+  }
+  return findings;
 }
 
 export async function fetchScorecard(owner, repo) {
@@ -100,22 +148,7 @@ export async function runDeps(ctx) {
   await mapLimit(ids.slice(0, MAX_DETAILS), 6, async (id) => details.set(id, await osvVuln(id)));
   if (ids.length > MAX_DETAILS) notes.push(`${ids.length} advisories matched. Details were fetched for the first ${MAX_DETAILS}.`);
 
-  for (const h of hits) {
-    const vulns = h.ids.map((id) => ({ id, v: details.get(id) }));
-    const worst = vulns.reduce((acc, { v }) => {
-      const s = v ? severityOf(v) : 'medium';
-      return ['high', 'medium', 'low'].indexOf(s) < ['high', 'medium', 'low'].indexOf(acc) ? s : acc;
-    }, 'low');
-    findings.push({
-      severity: worst,
-      title: `${h.pkg.name} ${h.pkg.version} (${h.pkg.ecosystem}): ${h.ids.length}${h.more ? '+' : ''} known advisor${h.ids.length === 1 ? 'y' : 'ies'}`,
-      path: [...h.pkg.paths][0],
-      samples: vulns.slice(0, 8).map(({ id, v }) => ({
-        text: `${id}${v?.aliases?.length ? ` (${v.aliases.slice(0, 3).join(', ')})` : ''}${v?.summary ? `: ${v.summary}` : ''}`,
-        osv: id,
-      })),
-    });
-  }
+  findings.push(...advisoryFindings(hits, details));
 
   const partial = osvFailed || unreadable || ctx.truncated;
   if (ctx.truncated) notes.push('The file list from GitHub was truncated, so some lockfiles may be missing.');
