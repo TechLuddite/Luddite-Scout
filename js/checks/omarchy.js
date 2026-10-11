@@ -37,11 +37,15 @@ function isComment(line) {
 }
 
 // QML Text-like items without an explicit textFormat render markup, which can
-// make the shell fetch remote images named in untrusted strings.
+// make the shell fetch remote images named in untrusted strings. A use of an
+// inline component declared in the same file (component Label: Text { ... })
+// inherits its textFormat, so only the declaration is checked.
 export function textSinksWithoutFormat(src) {
   const lines = [];
+  const local = new Set([...src.matchAll(/\bcomponent\s+(\w+)\s*:/g)].map((m) => m[1]));
   const re = /\b(Text|Label|TextEdit)\s*\{/g;
   for (const m of src.matchAll(re)) {
+    if (local.has(m[1])) continue;
     let i = m.index + m[0].length;
     let depth = 1;
     while (i < src.length && depth) {

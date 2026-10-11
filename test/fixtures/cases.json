@@ -177,6 +177,22 @@
       ]
     },
     {
+      "name": "QML inline Label component that sets textFormat",
+      "path": "Apps.qml",
+      "text": "Item {\n  component Label: Text {\n    textFormat: Text.PlainText\n    color: fg\n  }\n  Label { text: a }\n  Label { text: b }\n  Text { text: c }\n}\n",
+      "has": [
+        { "severity": "medium", "title": "1 Text item without textFormat", "line": 8, "count": 1 }
+      ]
+    },
+    {
+      "name": "QML inline Label component without textFormat is reported once",
+      "path": "Apps.qml",
+      "text": "Item {\n  component Label: Text { color: fg }\n  component Caption: Label { opacity: 0.5 }\n  Label { text: a }\n  Caption { text: b }\n}\n",
+      "has": [
+        { "severity": "medium", "title": "1 Text item without textFormat", "line": 2, "count": 1 }
+      ]
+    },
+    {
       "name": "shell string and network in QML",
       "path": "Widget.qml",
       "text": "Item {\n  property var c: [\"bash\", \"-c\", cmd]\n  function f() { var x = new XMLHttpRequest() }\n}\n",

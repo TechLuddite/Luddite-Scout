@@ -1447,8 +1447,13 @@ def read_manifest(text):
 
 
 def text_sinks_without_format(src):
+    # A use of an inline component declared in the same file inherits its
+    # textFormat, so only the declaration is checked.
     lines = []
+    local = set(re.findall(r"\bcomponent\s+(\w+)\s*:", src))
     for m in re.finditer(r"\b(Text|Label|TextEdit)\s*\{", src):
+        if m.group(1) in local:
+            continue
         i, depth = m.end(), 1
         while i < len(src) and depth:
             if src[i] == "{":
