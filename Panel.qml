@@ -93,7 +93,7 @@ Panel {
     root.reportBuffer = ""
     if (data && typeof data.error === "string") {
       root.errorText = data.error.slice(0, 300)
-    } else if (data && Array.isArray(data.checks) && data.checks.length <= 20) {
+    } else if (data && root.list(data.checks, 21).length > 0 && root.list(data.checks, 21).length <= 20) {
       root.report = data
     } else if (code === 124 || code === 137) {
       root.errorText = "The scan took longer than four minutes and was stopped."
@@ -101,6 +101,17 @@ Panel {
       var err = root.errorBuffer.trim().slice(0, 300)
       root.errorText = err !== "" ? err : "The scan failed (exit " + code + ")."
     }
+  }
+
+  // Lists inside a Repeater's modelData arrive as Qt sequence types, for
+  // which Array.isArray is false. Copy any list-like value into a plain
+  // array, capped at max items.
+  function list(v, max) {
+    var out = []
+    if (!v || typeof v === "string") return out
+    var n = Math.min(Number(v.length) || 0, max)
+    for (var i = 0; i < n; i++) out.push(v[i])
+    return out
   }
 
   function severityColor(sev) {
@@ -276,7 +287,7 @@ Panel {
               delegate: ColumnLayout {
                 id: check
                 required property var modelData
-                readonly property var findings: Array.isArray(modelData.findings) ? modelData.findings : []
+                readonly property var findings: root.list(modelData.findings, 500)
                 Layout.fillWidth: true
                 spacing: Style.spacing.xs
 
@@ -291,7 +302,7 @@ Panel {
                 }
 
                 Repeater {
-                  model: Array.isArray(check.modelData.notes) ? check.modelData.notes.slice(0, 6) : []
+                  model: root.list(check.modelData.notes, 6)
                   delegate: Plain {
                     required property var modelData
                     Layout.fillWidth: true
@@ -304,7 +315,7 @@ Panel {
                 }
 
                 Repeater {
-                  model: Array.isArray(check.modelData.facts) ? check.modelData.facts.slice(0, 16) : []
+                  model: root.list(check.modelData.facts, 16)
                   delegate: Plain {
                     required property var modelData
                     Layout.fillWidth: true
