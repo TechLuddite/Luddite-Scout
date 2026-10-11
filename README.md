@@ -43,6 +43,18 @@ S1 to S6 apply to any repository. S7 reports "not applicable" unless the reposit
 
 Each check reports whether it ran in full, ran partially, was skipped, or does not apply, with the reason. A skipped check is never shown as a pass. Findings are pattern matches for a human to judge. A clean report is not proof that a repository is safe.
 
+## What a report looks like
+
+These examples scan the author's own repositories.
+
+The summary for [TechLuddite/NetReady](https://github.com/TechLuddite/NetReady), a website project, so S7 does not apply:
+
+![Website report summary for TechLuddite/NetReady, listing S1 to S7 with their status and finding counts](docs/screenshots/website-summary.png)
+
+The S7 card for [TechLuddite/luddite-gestures](https://github.com/TechLuddite/luddite-gestures), an Omarchy plugin, with each finding linked to the line it came from:
+
+![S7 Omarchy plugin card for TechLuddite/luddite-gestures, showing four medium findings with file and line links](docs/screenshots/website-omarchy-check.png)
+
 ## Website
 
 Open https://techluddite.github.io/Luddite-Scout/ and enter `owner/repo` or a GitHub URL. To run your own copy there is no build step:
@@ -73,7 +85,11 @@ omarchy plugin add https://github.com/TechLuddite/Luddite-Scout
 omarchy plugin enable io.github.techluddite.luddite-scout
 ```
 
-The bar icon opens a panel. Type a repository, press Enter, and the panel runs `bin/scout --json` under `/usr/bin/timeout` and shows the report. The panel shows up to eight findings per check, and the website or terminal shows the rest. If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that login, which raises GitHub's limit from 60 to 5,000 requests an hour. The token stays inside `bin/scout` and is sent only to `api.github.com`. Without a login the panel works anonymously. The plugin needs `/usr/bin/python3`, has no settings, and writes no files.
+The bar icon opens a panel. Type a repository, press Enter, and the panel runs `bin/scout --json` under `/usr/bin/timeout` and shows the report.
+
+![The Luddite Scout panel on Omarchy showing a report for TechLuddite/luddite-gestures](preview.png)
+
+The panel shows up to eight findings per check, and the website or terminal shows the rest. If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that login, which raises GitHub's limit from 60 to 5,000 requests an hour. The token stays inside `bin/scout` and is sent only to `api.github.com`. Without a login the panel works anonymously. The plugin needs `/usr/bin/python3`, has no settings, and writes no files.
 
 To remove it:
 
