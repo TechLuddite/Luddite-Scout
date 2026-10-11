@@ -1,0 +1,10 @@
+{
+  "name": "luddite-scout",
+  "private": true,
+  "type": "module",
+  "description": "Static pre-flight check for public GitHub repositories. No build step and no runtime dependencies.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "serve": "python3 -m http.server 8000"
+  }
+}

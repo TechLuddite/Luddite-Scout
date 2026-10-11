@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>About Luddite Scout</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <h1>About Luddite Scout</h1>
+      <nav><a href="./">Back to the scanner</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap prose">
+    <h2>What it does</h2>
+    <p>Luddite Scout reads a public GitHub repository and reports what a careful person would want to know before pointing a coding agent at it, or building it:</p>
+    <ul>
+      <li><strong>S1 Repository setup.</strong> Security policy, private vulnerability reporting, licence, archive and fork status, open pull requests.</li>
+      <li><strong>S2 Agent instruction files.</strong> Files such as CLAUDE.md, AGENTS.md, .claude/, .mcp.json, editor tasks and dev container config that an agent or editor may read or execute.</li>
+      <li><strong>S3 Hidden Unicode.</strong> Bidirectional controls, tag characters and zero-width characters that hide text from a human reviewer.</li>
+      <li><strong>S4 GitHub Actions.</strong> Risky trigger and checkout combinations, untrusted input inside shell steps, unpinned actions, broad permissions.</li>
+      <li><strong>S5 Dependencies.</strong> Lockfiles checked against the OSV advisory database, plus the OpenSSF Scorecard result where one exists.</li>
+      <li><strong>S6 Build-time code.</strong> Scripts that run when the project is installed, built, or opened, such as build.rs, install scripts and .envrc.</li>
+    </ul>
+    <p>Every check reports whether it ran in full, ran partially, or was skipped, and why. A skipped check is never shown as a pass.</p>
+
+    <h2>What it does not do</h2>
+    <ul>
+      <li>It does not run any code from the repository, and it does not use an AI model.</li>
+      <li>It does not review code for vulnerabilities. Its findings are pattern matches and need a human to judge them.</li>
+      <li>It only reads public repositories, and only the default branch.</li>
+    </ul>
+
+    <h2>Data handling</h2>
+    <p>The site is static. There is no server of ours involved, and nothing is stored, logged or shared by this site. Your browser talks directly to these services:</p>
+    <ul>
+      <li><code>api.github.com</code>: repository details, file list, pull requests, vulnerability reporting status.</li>
+      <li><code>raw.githubusercontent.com</code>: file contents, pinned to the commit being reviewed.</li>
+      <li><code>api.osv.dev</code>: package names and versions from the repository's lockfiles, to look up advisories.</li>
+      <li><code>api.securityscorecards.dev</code>: the repository name, to look up its Scorecard result.</li>
+    </ul>
+    <p>Those services see your IP address and what you looked up, under their own privacy policies. The Content Security Policy on the scanner page blocks connections to any other host.</p>
+    <p>If you supply a GitHub token it is held in memory until you close or reload the page. It is sent only to <code>api.github.com</code> and is never written to browser storage.</p>
+    <p>Results stay on your screen. There is no share link, because a report can describe weaknesses the project has not fixed yet.</p>
+
+    <h2>Limits</h2>
+    <ul>
+      <li>Without a token GitHub allows 60 API requests an hour per address. A review uses about five.</li>
+      <li>File contents over 1 MB, binary files, and repositories with very large file trees are only partly covered. The report says so when that happens.</li>
+    </ul>
+  </main>
+</body>
+</html>

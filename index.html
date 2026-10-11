@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.github.com https://raw.githubusercontent.com https://api.osv.dev https://api.securityscorecards.dev; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Luddite Scout</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <h1>Luddite Scout</h1>
+      <p class="tagline">A pre-flight check for a public GitHub repository, before you let an agent or a build near it. Everything runs in your browser.</p>
+      <nav><a href="about.html">About and data handling</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <form id="scan-form" class="scan-form" autocomplete="off">
+      <label for="repo-input">Repository</label>
+      <div class="row">
+        <input id="repo-input" name="repo" type="text" required spellcheck="false"
+               placeholder="https://github.com/owner/repo or owner/repo">
+        <button id="scan-button" type="submit">Scout</button>
+      </div>
+      <details class="token">
+        <summary>Optional GitHub token</summary>
+        <p>Without a token GitHub allows 60 API requests an hour from your address, which is enough for roughly ten reviews. A fine-grained token with no permissions raises that limit. It is kept in memory for this page only, never stored, and only sent to api.github.com.</p>
+        <input id="token-input" type="password" spellcheck="false" placeholder="github_pat_...">
+      </details>
+    </form>
+
+    <section id="status" class="status" aria-live="polite" hidden></section>
+    <section id="results" class="results"></section>
+  </main>
+
+  <footer class="wrap site-footer">
+    <p>Findings are heuristics. A clean report is not proof a repository is safe.</p>
+  </footer>
+</body>
+</html>
