@@ -60,10 +60,11 @@ python3 -m http.server 8000
 ```sh
 bin/scout owner/repo                              # readable report
 bin/scout --json owner/repo                       # JSON report
-gh auth token | bin/scout --token-stdin owner/repo  # use a token for a higher rate limit
+bin/scout --gh-token owner/repo                   # use the GitHub CLI's login for a higher rate limit
+gh auth token | bin/scout --token-stdin owner/repo  # or pass any token on standard input
 ```
 
-A token is read from standard input only, never from the command line or the environment, so other processes cannot read it. The JSON report is capped at about 1.5 MB. The lowest-severity findings are dropped first, and the report says when that happened. The readable report and the website show every finding.
+A token never goes on the command line or into the environment, where other processes could read it. `--gh-token` finds the `gh` you run by default without installing anything: it asks mise (`mise which gh`, which is how Omarchy installs `gh`) and falls back to `/usr/bin/gh`. It then runs `gh auth token` and keeps the result inside the scanner process. If GitHub rejects a token, the scan continues anonymously and the report says so. The JSON report is capped at about 1.5 MB. The lowest-severity findings are dropped first, and the report says when that happened. The readable report and the website show every finding.
 
 ## Omarchy plugin
 
@@ -72,7 +73,7 @@ omarchy plugin add https://github.com/TechLuddite/Luddite-Scout
 omarchy plugin enable io.github.techluddite.luddite-scout
 ```
 
-The bar icon opens a panel. Type a repository, press Enter, and the panel runs `bin/scout --json` under `/usr/bin/timeout` and shows the report. The panel shows up to eight findings per check, and the website or terminal shows the rest. The plugin needs `/usr/bin/python3`, has no settings, uses no token, and writes no files.
+The bar icon opens a panel. Type a repository, press Enter, and the panel runs `bin/scout --json` under `/usr/bin/timeout` and shows the report. The panel shows up to eight findings per check, and the website or terminal shows the rest. If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that login, which raises GitHub's limit from 60 to 5,000 requests an hour. The token stays inside `bin/scout` and is sent only to `api.github.com`. Without a login the panel works anonymously. The plugin needs `/usr/bin/python3`, has no settings, and writes no files.
 
 To remove it:
 

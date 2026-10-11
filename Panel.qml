@@ -24,11 +24,17 @@ Panel {
     String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
   readonly property string websiteUrl: "https://techluddite.github.io/Luddite-Scout/"
 
-  // The helper gets a fixed PATH and nothing else from the shell's environment.
+  // The helper gets a fixed PATH and only what the GitHub CLI needs to reach
+  // its stored login: the home and config directories, and the session bus
+  // for a token kept in the keyring. bin/scout reads the token from gh's
+  // output itself, so it never passes through this panel.
   readonly property var processEnvironment: ({
     PATH: "/usr/bin:/bin",
     HOME: Quickshell.env("HOME"),
-    LANG: "C.UTF-8"
+    LANG: "C.UTF-8",
+    XDG_CONFIG_HOME: Quickshell.env("XDG_CONFIG_HOME") || "",
+    XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR") || "",
+    DBUS_SESSION_BUS_ADDRESS: Quickshell.env("DBUS_SESSION_BUS_ADDRESS") || ""
   })
 
   readonly property int maxReportChars: 2000000
@@ -72,7 +78,7 @@ Panel {
     root.running = true
     scanProc.runGeneration = root.generation
     scanProc.command = ["/usr/bin/timeout", "-k", "5", "240",
-                        "/usr/bin/python3", "-I", "-S", root.pluginDir + "/bin/scout", "--json", target]
+                        "/usr/bin/python3", "-I", "-S", root.pluginDir + "/bin/scout", "--json", "--gh-token", target]
     scanProc.running = true
   }
 
@@ -373,7 +379,9 @@ Panel {
           Plain {
             Layout.fillWidth: true
             text: root.report && root.report.api
-              ? "GitHub API: " + Number(root.report.api.remaining) + " of " + Number(root.report.api.limit) + " requests left this hour."
+              ? "GitHub API, " + (root.report.api.authenticated === true ? "signed in through gh" : "anonymous") + ": "
+                + Number(root.report.api.remaining) + " of " + Number(root.report.api.limit) + " requests left this hour."
+                + (root.report.api.tokenRejected === true ? " GitHub rejected the gh token." : "")
               : "Findings are pattern matches for you to judge, not a verdict."
             color: root.foreground
             opacity: 0.6

@@ -7,6 +7,7 @@ Reviews a public GitHub repository with the same checks as the web page
     scout owner/repo            human-readable report
     scout --json owner/repo     JSON report, used by the Omarchy panel
     scout --token-stdin ...     read a GitHub token from stdin, never argv
+    scout --gh-token ...        use the token of the signed-in GitHub CLI (gh)
 
 It runs nothing from the scanned repository. It only talks to four fixed
 HTTPS hosts, refuses redirects, caps every response while reading it, and
@@ -14,8 +15,10 @@ stops at an overall deadline.
 """
 
 import json
+import os
 import re
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -89,6 +92,7 @@ class Net:
         self.remaining = None
         self.reset = None
         self.calls = 0
+        self.token_rejected = False
         self._lock = threading.Lock()
         self._opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}),
@@ -133,8 +137,14 @@ class Net:
             return None
         if status in (403, 429) and self.remaining == 0:
             raise RateLimitError(self.reset)
+        if status == 401 and self.token:
+            # An expired or revoked token should not stop a scan of public
+            # data. Drop it and carry on at the anonymous limit.
+            self.token = None
+            self.token_rejected = True
+            return self.api(path)
         if status == 401:
-            raise ScanError("GitHub rejected the token.")
+            raise ScanError("GitHub rejected the request.")
         if status != 200:
             raise ScanError(f"GitHub API returned {status} for {path}.")
         return json.loads(body)
@@ -1245,7 +1255,8 @@ def scan(target, token=None):
     return {
         "tool": "luddite-scout", "version": VERSION,
         "repository": f"{owner}/{repo}", "commit": sha,
-        "api": {"calls": net.calls, "remaining": net.remaining, "limit": net.limit},
+        "api": {"calls": net.calls, "remaining": net.remaining, "limit": net.limit,
+                "authenticated": net.token is not None, "tokenRejected": net.token_rejected},
         "checks": [{"id": cid, "name": name, **results[cid]} for cid, name, _ in CHECKS],
     }
 
@@ -1270,7 +1281,10 @@ def format_text(report):
             out.append(f"  {f['severity'].upper():6} {f['title']}{loc}")
     api = report["api"]
     out.append("")
-    out.append(f"GitHub API: {api['calls']} requests used, {api['remaining']} of {api['limit']} left this hour.")
+    who = "signed in" if api.get("authenticated") else "anonymous"
+    out.append(f"GitHub API ({who}): {api['calls']} requests used, {api['remaining']} of {api['limit']} left this hour.")
+    if api.get("tokenRejected"):
+        out.append("GitHub rejected the token, so the scan continued without it.")
     return "\n".join(out)
 
 
@@ -1292,10 +1306,56 @@ def bounded_json(report):
     return out
 
 
+def gh_executable():
+    """The GitHub CLI the user runs by default, without installing anything.
+
+    Omarchy installs gh through mise, and its ~/.local/bin/gh wrapper runs
+    `mise use -g gh`, which can download and upgrade. `mise which gh` only
+    reports the binary mise would run, so it is asked first, from the home
+    directory so a project-local mise.toml in the current folder cannot
+    redirect it. A system package at /usr/bin/gh is the fallback.
+    """
+    home = os.path.expanduser("~")
+    env = {"HOME": home, "PATH": "/usr/bin:/bin"}
+    if os.path.isfile("/usr/bin/mise"):
+        try:
+            out = subprocess.run(["/usr/bin/mise", "which", "gh"], cwd=home, env=env, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10).stdout[:4096]
+            path = out.decode("utf-8", "replace").strip()
+            if path.startswith("/") and "\n" not in path and os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if os.path.isfile("/usr/bin/gh") and os.access("/usr/bin/gh", os.X_OK):
+        return "/usr/bin/gh"
+    return None
+
+
+def gh_token():
+    """Token of the GitHub CLI's active account, or None. Read from gh's
+    stdout into this process only: never placed in an argument list, an
+    environment variable, a file or the report."""
+    gh = gh_executable()
+    if not gh:
+        return None
+    home = os.path.expanduser("~")
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1"}
+    for name in ("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
+    try:
+        out = subprocess.run([gh, "auth", "token", "--hostname", "github.com"], cwd=home, env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10).stdout[:512]
+    except (OSError, subprocess.SubprocessError):
+        return None
+    token = out.decode("ascii", "replace").strip()
+    return token if re.fullmatch(r"[A-Za-z0-9_]{20,255}", token) else None
+
+
 def main(argv):
     args = [a for a in argv if not a.startswith("--")]
     flags = {a for a in argv if a.startswith("--")}
-    unknown = flags - {"--json", "--token-stdin", "--help", "--version"}
+    unknown = flags - {"--json", "--token-stdin", "--gh-token", "--help", "--version"}
     if "--help" in flags or unknown or len(args) != 1:
         if "--version" in flags and not args:
             print(VERSION)
@@ -1308,6 +1368,8 @@ def main(argv):
         if token and not re.fullmatch(r"[A-Za-z0-9_]{20,255}", token):
             print("That does not look like a GitHub token.", file=sys.stderr)
             return 2
+    elif "--gh-token" in flags:
+        token = gh_token()
     try:
         report = scan(args[0], token)
     except ValueError as e:
