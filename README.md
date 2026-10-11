@@ -71,4 +71,4 @@ For bugs and suggestions, open an issue. Please do not report security problems 
 
 ## Licence
 
-No licence has been chosen yet. Until one is published, all rights are reserved.
+[MIT](LICENSE).
