@@ -2,7 +2,9 @@
 
 A pre-flight check for a public GitHub repository, run before you point a coding agent at it or build it. Paste a repository URL and get a report a person can read in a few minutes. Everything runs in your browser.
 
-**Status:** experimental, first version under active development. Not yet deployed to GitHub Pages.
+**Status:** experimental, first version under active development.
+
+**Use it:** https://techluddite.github.io/Luddite-Scout/
 
 ## Credits
 
@@ -33,9 +35,9 @@ Research the checks are based on:
 
 Each check reports whether it ran in full, ran partially, or was skipped, with the reason. A skipped check is never shown as a pass. Findings are pattern matches for a human to judge. A clean report is not proof that a repository is safe.
 
-## Use it
+## Run it locally
 
-Until the Pages site is live, run it locally. There is no build step and there are no dependencies.
+The live site is at https://techluddite.github.io/Luddite-Scout/. To run your own copy, there is no build step and there are no dependencies.
 
 ```sh
 git clone https://github.com/TechLuddite/Luddite-Scout.git
@@ -65,7 +67,7 @@ The checks in `js/checks/` are plain functions with no DOM access, so they run u
 
 ## Help and security
 
-For bugs and suggestions, open an issue. Please do not report security problems in public issues. A private reporting route will be set up and described in `SECURITY.md` before the first release.
+For bugs and suggestions, open an issue. Please do not report security problems in public issues. Use GitHub private vulnerability reporting as described in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
