@@ -115,7 +115,7 @@ test('no hidden characters in this repository', async () => {
   const { readdirSync, statSync } = await import('node:fs');
   const root = new URL('../', import.meta.url).pathname;
   const walk = (dir) => readdirSync(dir).flatMap((name) => {
-    if (name === '.git' || name === 'node_modules' || name === '__pycache__') return [];
+    if (name === '.git' || name === 'node_modules' || name === '__pycache__' || name === 'dist') return [];
     const p = dir + name;
     return statSync(p).isDirectory() ? walk(p + '/') : [p];
   });

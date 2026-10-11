@@ -20,3 +20,59 @@ jobs:
           node-version: 22
       - run: npm test
       - run: python3 -m unittest discover -s test
+
+  # Publishes luddite-scout.skill after tests pass on main, when bin/scout,
+  # skill/ or LICENSE changed since the last skill release. Pull requests
+  # never reach this job, so they never get a write token.
+  release-skill:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-skill
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: changed
+        run: |
+          last=$(git describe --tags --match 'skill-v*' --abbrev=0 2>/dev/null || true)
+          if [ -n "$last" ] && git diff --quiet "$last" HEAD -- bin/scout skill LICENSE; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.release == 'true'
+        run: skill/build.sh
+      - if: steps.changed.outputs.release == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/luddite-scout.skill
+      - if: steps.changed.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' bin/scout)
+          short=${GITHUB_SHA::7}
+          sum=$(sha256sum dist/luddite-scout.skill | cut -d' ' -f1)
+          cat > notes.md <<NOTES
+          Built by CI from ${GITHUB_SHA}.
+
+          SHA-256: \`${sum}\`
+
+          Check that this file came from this repository's CI before installing it:
+
+          \`\`\`sh
+          gh attestation verify luddite-scout.skill --repo ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          Install for Claude Code: \`unzip luddite-scout.skill -d ~/.claude/skills/\`. See the README for the Claude apps and for what the skill does and does not protect against.
+          NOTES
+          gh release create "skill-v${version}-${short}" dist/luddite-scout.skill \
+            --target "$GITHUB_SHA" --title "Skill ${version} (${short})" --notes-file notes.md --latest

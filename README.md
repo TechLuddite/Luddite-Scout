@@ -4,11 +4,12 @@ A pre-flight check for a public GitHub repository, run before you point a coding
 
 **Status:** experimental, under active development.
 
-Three ways to use it, all running the same checks:
+Four ways to use it, all running the same checks:
 
 - **Website:** https://techluddite.github.io/Luddite-Scout/. Everything runs in your browser.
 - **Terminal:** `bin/scout owner/repo`. One Python file, standard library only.
 - **Omarchy:** a bar widget and panel for the Omarchy desktop.
+- **Agent skill:** `luddite-scout.skill` for Claude Code and the Claude apps. The agent gets a summary with no text from the scanned repository.
 
 ## Credits
 
@@ -72,6 +73,7 @@ python3 -m http.server 8000
 ```sh
 bin/scout owner/repo                              # readable report
 bin/scout --json owner/repo                       # JSON report
+bin/scout --agent owner/repo                      # summary for a coding agent, no repository text
 bin/scout --gh-token owner/repo                   # use the GitHub CLI's login for a higher rate limit
 gh auth token | bin/scout --token-stdin owner/repo  # or pass any token on standard input
 ```
@@ -99,6 +101,81 @@ omarchy plugin remove io.github.techluddite.luddite-scout
 
 Nothing is left behind: the plugin keeps no state, cache, credentials or configuration outside its own folder.
 
+## Agent skill
+
+The skill lets a coding agent check a repository before it touches it, without reading anything the repository wrote. A repository under review may be hostile, and its instruction files, file names, settings and package metadata are exactly where it would put text aimed at an agent. The skill keeps that text out of the agent's context.
+
+### Install
+
+Download `luddite-scout.skill` from the [latest release](https://github.com/TechLuddite/Luddite-Scout/releases/latest). A new release is built by CI whenever a change to `bin/scout`, `skill/` or `LICENSE` reaches `main`. Before installing, check that the file came from this repository's CI:
+
+```sh
+gh attestation verify luddite-scout.skill --repo TechLuddite/Luddite-Scout
+```
+
+Claude Code:
+
+```sh
+unzip luddite-scout.skill -d ~/.claude/skills/
+```
+
+Claude apps: upload the file under Customize, Skills. This has not been tested yet. The script needs HTTPS access to the four hosts below, and code execution in the Claude apps may not allow them.
+
+To build it yourself, run `skill/build.sh`. It writes `dist/luddite-scout.skill`, and the same commit always gives the same file.
+
+### How it works
+
+The skill runs `scout --agent owner/repo`. That mode prints only:
+
+- rule IDs such as `S2.hooks`, with a fixed description written by Luddite Scout
+- severity, status and counts
+- the repository name you asked for and the commit hash that was scanned
+- the command for the full report
+
+File names, file contents, line text, settings values, MCP server names, script names, repository descriptions and advisory summaries are never printed. Before printing, `scout` checks every string in its output against an allowlist of those fixed values. If anything else gets through, it prints a `guard` error instead of the report. Errors are fixed codes too, because an error message can quote the repository.
+
+`test/test_agent_mode.py` runs the real scan against a fake repository with injection text in every name, file, setting, description and advisory. It checks that the text appears in the full report and nowhere in the agent report.
+
+You read the detail. The agent's summary ends with a command such as `python3 -I -S ~/.claude/skills/luddite-scout/scripts/scout owner/repo`. Run it in a separate terminal. Do not run it with the `!` prefix in Claude Code, because that puts its output, repository text included, into the conversation.
+
+### What it does not protect against
+
+The guardrails are listed at the top of `skill/SKILL.md` and in the skill's description, so the agent sees them before it decides to use the skill. Only the first is enforced by code.
+
+| | Gap | Status |
+| --- | --- | --- |
+| G1 | The agent can still read the repository with its other tools: web fetch, `git clone`, `gh`, `curl`, or search results that quote the README. | Instruction only. See hardening below. |
+| G2 | You can paste repository text into the conversation yourself, or run the full report with `!`. | Instruction only. The skill tells the agent not to ask for it. |
+| G3 | The agent knows which rules fired and how often, but not which file or why. It can't advise on a specific line. | By design. The detail is for you. |
+| G4 | The repository name is printed. You typed it, and GitHub limits names to letters, digits, `.`, `-` and `_`, but a name can still read like an instruction. | Accepted. |
+| G5 | The scan covers one commit of the default branch. The repository can change after the scan. | The commit hash in the output records what was scanned. |
+| G6 | The skill runs `scout` with network access on your machine. A compromised release would run with your permissions. | Check the attestation before installing. Releases are built only from `main` after tests pass. |
+| G7 | `allowed-tools` pre-approves only the scan command, and only in Claude Code. Other clients will ask you to approve it. | Expected. |
+| G8 | A summary with no findings is not proof that a repository is safe. Findings are pattern matches. | The output and the skill both say so. |
+
+### Hardening G1 in Claude Code
+
+To make it harder for the agent to read a repository during a review, run the review from a dedicated folder with a `.claude/settings.json` like this:
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:*.github.com)",
+      "WebFetch(domain:*.githubusercontent.com)",
+      "Bash(git clone *)",
+      "Bash(gh repo *)",
+      "Bash(gh api *)",
+      "Bash(curl *)",
+      "Bash(wget *)"
+    ]
+  }
+}
+```
+
+Deny rules take precedence over allow rules. Claude Code's [permissions documentation](https://code.claude.com/docs/en/permissions) says Bash deny rules match the command as Claude writes it, not every way of running the same program, so treat them as a speed bump rather than a boundary. A sandbox network allowlist can't close the gap either, because `scout` needs the same GitHub hosts the agent would use to read the repository.
+
 ## Limitations and data handling
 
 - Public repositories only, default branch only.
@@ -115,7 +192,9 @@ npm test        # node --test and python3 -m unittest, no packages to install
 npm run serve   # python3 -m http.server 8000
 ```
 
-The checks exist twice: in `js/checks/` for the website and in `bin/scout` for the terminal and the panel. Both run the same cases from `test/fixtures/cases.json`, and finding titles must match, so a rule changed in one place and not the other fails the tests. A further test runs S3 over this repository itself.
+The checks exist twice: in `js/checks/` for the website and in `bin/scout` for the terminal, the panel and the skill. Both run the same cases from `test/fixtures/cases.json`, and finding titles must match, so a rule changed in one place and not the other fails the tests. A further test runs S3 over this repository itself.
+
+Every finding in `bin/scout` carries a `rule` ID from the `RULES` table, which `--agent` mode uses in place of the title. A new finding needs a new entry there, and the shared-case tests fail if a finding has no known rule. `skill/SKILL.md` is the skill's source, and `skill/build.sh` packages it with `bin/scout`. The `release-skill` job in `.github/workflows/test.yml` runs the build and publishes the release.
 
 ## Help and security
 

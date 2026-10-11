@@ -24,6 +24,8 @@ def text(t):
 class SharedCases(unittest.TestCase):
     def assert_findings(self, findings, c):
         name = c.get("name", "")
+        for f in findings:
+            self.assertIn(f.get("rule"), scout.RULES, f'{name}: no rule ID for "{f["title"]}"')
         if not c["has"]:
             self.assertEqual([f["title"] for f in findings], [], f"{name}: expected no findings")
         for want in c["has"]:
@@ -102,6 +104,7 @@ class SharedCases(unittest.TestCase):
     def test_advisories(self):
         for c in CASES["advisories"]:
             f = scout.advisory_findings([c["hit"]], c["details"])[0]
+            self.assertEqual(f["rule"], "S5.known-advisories", c["name"])
             self.assertEqual(f["title"], c["expect"]["title"], c["name"])
             self.assertEqual(f["severity"], c["expect"]["severity"], c["name"])
             self.assertEqual([s["osv"] for s in f["samples"]], c["expect"]["samples"], c["name"])
