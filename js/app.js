@@ -8,6 +8,7 @@ import { runUnicode } from './checks/unicode.js';
 import { runWorkflows } from './checks/workflows.js';
 import { runDeps } from './checks/deps.js';
 import { runBuild } from './checks/build.js';
+import { runOmarchy } from './checks/omarchy.js';
 
 const CHECKS = [
   { id: 'S1', name: 'Repository setup', run: runSetup },
@@ -16,12 +17,13 @@ const CHECKS = [
   { id: 'S4', name: 'GitHub Actions', run: runWorkflows },
   { id: 'S5', name: 'Dependencies', run: runDeps },
   { id: 'S6', name: 'Build-time code', run: runBuild },
+  { id: 'S7', name: 'Omarchy plugin', run: runOmarchy },
 ];
 // S3 reads every text file, so it goes last.
-const RUN_ORDER = ['S1', 'S2', 'S4', 'S6', 'S5', 'S3'];
+const RUN_ORDER = ['S1', 'S2', 'S4', 'S6', 'S7', 'S5', 'S3'];
 const SEVERITIES = ['high', 'medium', 'low', 'info'];
 const SHOWN = 8;
-const STATUS_TEXT ={ ran: 'Ran', partial: 'Partial', skipped: 'Skipped', waiting: 'Waiting', running: 'Running' };
+const STATUS_TEXT = { ran: 'Ran', partial: 'Partial', skipped: 'Skipped', 'not-applicable': 'Not applicable', waiting: 'Waiting', running: 'Running' };
 
 // Every string from the repository reaches the page through text nodes only.
 function h(tag, props = {}, ...children) {
@@ -117,8 +119,10 @@ function renderContents(title, text) {
 
 function renderExtras(ctx, id, result) {
   const out = [];
-  if (id === 'S1') {
+  if (result.facts) {
     out.push(h('dl', { class: 'facts' }, result.facts.map(([k, v]) => [h('dt', {}, k), h('dd', {}, reveal(String(v ?? 'Unknown')))])));
+  }
+  if (id === 'S1') {
     if (result.policy?.text) out.push(renderContents(`Security policy: ${result.policy.path}`, result.policy.text));
   }
   if (id === 'S2' && result.contents?.length) {

@@ -1,7 +1,7 @@
 // S3. Characters that change how text displays, or hide it, without being visible.
 import { codePoint, lineAt, lineText, truncate } from '../lib/text.js';
 
-const PATTERN = /[­؜᠎​-‏‪-‮⁠-⁤⁦-⁩﻿\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+const PATTERN = /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 
 export function classify(ch) {
   const cp = ch.codePointAt(0);
@@ -20,7 +20,7 @@ const RANK = { info: 0, low: 1, medium: 2, high: 3 };
 
 // Joiners between emoji are normal ("family" emoji, flags), so they are dropped.
 function isEmojiJoin(text, index, ch) {
-  if (ch !== '‍') return false;
+  if (ch !== '\u200D') return false;
   const before = text.slice(Math.max(0, index - 2), index);
   const after = text.slice(index + 1, index + 3);
   return /\p{Extended_Pictographic}/u.test(before) && /\p{Extended_Pictographic}/u.test(after);
@@ -38,7 +38,7 @@ export function scanText(text, { maxSamples = 10 } = {}) {
   PATTERN.lastIndex = 0;
   for (const m of text.matchAll(PATTERN)) {
     const ch = m[0];
-    if (ch === '﻿' && m.index === 0) continue; // byte order mark
+    if (ch === '\uFEFF' && m.index === 0) continue; // byte order mark
     if (isEmojiJoin(text, m.index, ch)) continue;
     const { kind, severity: sev } = classify(ch);
     counts.set(kind, (counts.get(kind) || 0) + 1);

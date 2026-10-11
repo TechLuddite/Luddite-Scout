@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.techluddite.luddite-scout",
+  "name": "Luddite Scout",
+  "version": "0.2.0",
+  "author": "TechLuddite",
+  "license": "MIT",
+  "description": "Pre-flight check for a public GitHub repository, before you let an agent near it, build it, or add it as an Omarchy plugin. Runs nothing from the repository.",
+  "homepage": "https://techluddite.github.io/Luddite-Scout/",
+  "repository": "https://github.com/TechLuddite/Luddite-Scout",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarIcon.qml" },
+  "barWidget": {
+    "displayName": "Luddite Scout",
+    "description": "Scan a GitHub repository before you trust it.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

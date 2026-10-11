@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Static pre-flight check for public GitHub repositories. No build step and no runtime dependencies.",
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --test test/*.test.js && python3 -m unittest discover -s test",
     "serve": "python3 -m http.server 8000"
   }
 }

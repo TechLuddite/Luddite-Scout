@@ -169,3 +169,5 @@ button:disabled { opacity: 0.6; cursor: progress; }
 
 .prose { padding-top: 8px; padding-bottom: 24px; }
 .prose h2 { margin-top: 28px; }
+
+.state-not-applicable { color: var(--muted); }

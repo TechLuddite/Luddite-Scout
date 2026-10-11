@@ -1,0 +1,1331 @@
+#!/usr/bin/python3 -IS
+"""Luddite Scout command-line scanner.
+
+Reviews a public GitHub repository with the same checks as the web page
+(js/checks/) and prints one bounded report. Standard library only.
+
+    scout owner/repo            human-readable report
+    scout --json owner/repo     JSON report, used by the Omarchy panel
+    scout --token-stdin ...     read a GitHub token from stdin, never argv
+
+It runs nothing from the scanned repository. It only talks to four fixed
+HTTPS hosts, refuses redirects, caps every response while reading it, and
+stops at an overall deadline.
+"""
+
+import json
+import re
+import ssl
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+VERSION = "0.2.0"
+ALLOWED_HOSTS = {"api.github.com", "raw.githubusercontent.com", "api.osv.dev", "api.securityscorecards.dev"}
+DEADLINE_SECONDS = 180
+API_MAX_BYTES = 8_000_000
+RAW_MAX_BYTES = 1_000_000
+LOCKFILE_MAX_BYTES = 20_000_000
+OSV_MAX_BYTES = 10_000_000
+REPORT_MAX_FINDINGS = 200
+SEVERITIES = ["high", "medium", "low", "info"]
+RANK = {"info": 0, "low": 1, "medium": 2, "high": 3}
+
+
+class ScanError(Exception):
+    pass
+
+
+class RateLimitError(ScanError):
+    def __init__(self, reset):
+        when = time.strftime("%H:%M", time.localtime(reset)) if reset else "later"
+        super().__init__(f"GitHub API rate limit reached. It resets at {when}. A token raises the limit.")
+
+
+# ------------------------------------------------------------------ input
+
+NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+
+
+def parse_repo_input(value):
+    s = str(value or "").strip()
+    if not s:
+        raise ValueError("Enter a repository URL or owner/repo.")
+    s = re.sub(r"^git@github\.com:", "https://github.com/", s, flags=re.I)
+    if re.match(r"^github\.com/", s, re.I):
+        s = "https://" + s
+    if re.match(r"^https?://", s, re.I):
+        url = urllib.parse.urlsplit(s)
+        if not re.fullmatch(r"(www\.)?github\.com", url.hostname or "", re.I):
+            raise ValueError("Only github.com repositories are supported.")
+        parts = [p for p in url.path.split("/") if p]
+    else:
+        parts = [p for p in s.split("/") if p]
+    if len(parts) < 2:
+        raise ValueError("Expected owner/repo.")
+    owner, repo = parts[0], re.sub(r"\.git$", "", parts[1], flags=re.I)
+    if not NAME.match(owner) or not REPO.match(repo) or repo in (".", ".."):
+        raise ValueError("That owner or repository name is not valid on GitHub.")
+    return {"owner": owner, "repo": repo}
+
+
+# ---------------------------------------------------------------- network
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class Net:
+    def __init__(self, token=None):
+        self.token = token
+        self.deadline = time.monotonic() + DEADLINE_SECONDS
+        self.limit = None
+        self.remaining = None
+        self.reset = None
+        self.calls = 0
+        self._lock = threading.Lock()
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _NoRedirect(),
+            urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        )
+
+    def _request(self, url, max_bytes, data=None, headers=None):
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "https" or parts.hostname not in ALLOWED_HOSTS:
+            raise ScanError("refusing a request to a host outside the allowlist")
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise ScanError("the scan ran past its overall time limit")
+        req = urllib.request.Request(url, data=data, headers=headers or {}, method="POST" if data else "GET")
+        req.add_header("User-Agent", f"luddite-scout/{VERSION}")
+        try:
+            resp = self._opener.open(req, timeout=min(15, left))
+        except urllib.error.HTTPError as e:
+            body = e.read(4096)
+            return e.code, e.headers, body
+        except (urllib.error.URLError, OSError) as e:
+            raise ScanError(f"network error: {getattr(e, 'reason', e)}") from None
+        with resp:
+            body = resp.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                return 413, resp.headers, b""
+            return resp.status, resp.headers, body
+
+    def api(self, path):
+        headers = {"Accept": "application/vnd.github+json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        status, h, body = self._request("https://api.github.com" + path, API_MAX_BYTES, headers=headers)
+        with self._lock:
+            self.calls += 1
+            for name, attr in (("x-ratelimit-limit", "limit"), ("x-ratelimit-remaining", "remaining"), ("x-ratelimit-reset", "reset")):
+                v = h.get(name) if h else None
+                if v is not None and v.isdigit():
+                    setattr(self, attr, int(v))
+        if status == 404:
+            return None
+        if status in (403, 429) and self.remaining == 0:
+            raise RateLimitError(self.reset)
+        if status == 401:
+            raise ScanError("GitHub rejected the token.")
+        if status != 200:
+            raise ScanError(f"GitHub API returned {status} for {path}.")
+        return json.loads(body)
+
+    def raw(self, owner, repo, ref, path, max_bytes=RAW_MAX_BYTES):
+        quoted = "/".join(urllib.parse.quote(p, safe="") for p in path.split("/"))
+        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{urllib.parse.quote(ref, safe='')}/{quoted}"
+        try:
+            status, _, body = self._request(url, max_bytes)
+        except ScanError:
+            return {"skipped": "network error"}
+        if status == 404:
+            return {"skipped": "not found"}
+        if status == 429:
+            return {"skipped": "throttled by raw.githubusercontent.com"}
+        if status == 413:
+            return {"skipped": "over size limit"}
+        if status != 200:
+            return {"skipped": f"HTTP {status}"}
+        if b"\x00" in body[:8000]:
+            return {"skipped": "binary"}
+        return {"text": body.decode("utf-8", "replace")}
+
+    def post_json(self, url, payload, max_bytes):
+        data = json.dumps(payload).encode()
+        status, _, body = self._request(url, max_bytes, data=data, headers={"Content-Type": "application/json"})
+        if status != 200:
+            raise ScanError(f"returned {status}")
+        return json.loads(body)
+
+    def get_json(self, url, max_bytes):
+        status, _, body = self._request(url, max_bytes)
+        return status, (json.loads(body) if status == 200 else None)
+
+
+# ------------------------------------------------------------------ text
+
+BINARY_EXT = {
+    "png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "icns", "bmp", "tif", "tiff", "psd",
+    "woff", "woff2", "ttf", "otf", "eot",
+    "mp3", "mp4", "m4a", "wav", "ogg", "webm", "mov", "avi", "flac",
+    "zip", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "tar", "jar", "war",
+    "pdf", "wasm", "exe", "dll", "so", "dylib", "a", "o", "lib", "bin", "class", "pyc",
+    "node", "dmg", "pkg", "deb", "rpm", "msi", "apk", "ipa", "sqlite", "db",
+}
+
+
+def extension(path):
+    base = path.rsplit("/", 1)[-1]
+    dot = base.rfind(".")
+    return base[dot + 1:].lower() if dot > 0 else ""
+
+
+def truncate(s, n):
+    s = str(s)
+    return s[:n] + "…" if len(s) > n else s
+
+
+def code_point(ch):
+    return "U+%04X" % ord(ch)
+
+
+def parse_jsonc(text):
+    out = []
+    in_string = False
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if c == "\\" and i + 1 < len(text):
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+            out.append(c)
+        elif c == "/" and text[i + 1:i + 2] == "/":
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            out.append("\n")
+            continue
+        elif c == "/" and text[i + 1:i + 2] == "*":
+            end = text.find("*/", i + 2)
+            i = len(text) if end == -1 else end + 2
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return json.loads(re.sub(r",(\s*[}\]])", r"\1", "".join(out)))
+
+
+def command_text(v):
+    if isinstance(v, list):
+        return " ".join(str(x) for x in v)
+    if isinstance(v, dict):
+        return " ; ".join(command_text(x) for x in v.values())
+    return str(v)
+
+
+# --------------------------------------------------------------- S3 unicode
+
+HIDDEN = re.compile("[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\U000e0000-\U000e007f\U000e0100-\U000e01ef]")
+
+
+def classify_char(ch):
+    cp = ord(ch)
+    if 0x202A <= cp <= 0x202E or 0x2066 <= cp <= 0x2069:
+        return "Bidirectional control", "high"
+    if 0xE0000 <= cp <= 0xE007F:
+        return "Tag character", "high"
+    if 0xE0100 <= cp <= 0xE01EF:
+        return "Variation selector supplement", "high"
+    if cp in (0x200E, 0x200F, 0x061C):
+        return "Direction mark", "medium"
+    if cp in (0x200C, 0x200D):
+        return "Zero-width joiner", "low"
+    if cp == 0x00AD:
+        return "Soft hyphen", "low"
+    return "Zero-width or invisible character", "medium"
+
+
+def _pictographic(ch):
+    cp = ord(ch)
+    return 0x1F000 <= cp <= 0x1FAFF or 0x2600 <= cp <= 0x27BF or 0x2B00 <= cp <= 0x2BFF or 0x2190 <= cp <= 0x21FF or cp in (0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139)
+
+
+def _emoji_join(text, i):
+    if text[i] != "\u200D":
+        return False
+    return any(_pictographic(c) for c in text[max(0, i - 2):i]) and any(_pictographic(c) for c in text[i + 1:i + 3])
+
+
+def reveal(s):
+    return HIDDEN.sub(lambda m: "⟦%s⟧" % code_point(m.group(0)), s)
+
+
+def scan_text(text, max_samples=10):
+    counts = {}
+    samples = []
+    severity = None
+    for m in HIDDEN.finditer(text):
+        ch, i = m.group(0), m.start()
+        if ch == "\uFEFF" and i == 0:
+            continue
+        if _emoji_join(text, i):
+            continue
+        kind, sev = classify_char(ch)
+        counts[kind] = counts.get(kind, 0) + 1
+        if severity is None or RANK[sev] > RANK[severity]:
+            severity = sev
+        if len(samples) < max_samples:
+            line = text.count("\n", 0, i) + 1
+            start = text.rfind("\n", 0, i) + 1
+            end = text.find("\n", i)
+            full = text[start:len(text) if end == -1 else end]
+            column = i - start + 1
+            frm = max(0, column - 60)
+            samples.append({"line": line, "column": column, "codePoint": code_point(ch), "kind": kind,
+                            "excerpt": truncate(reveal(full[frm:frm + 160]), 220)})
+    return {"severity": severity, "counts": counts, "samples": samples} if severity else None
+
+
+def run_unicode(ctx, max_files=4000, max_bytes=60_000_000):
+    findings, notes = [], []
+    for e in ctx.entries:
+        hit = scan_text(e["path"], 1)
+        if hit:
+            findings.append({"severity": hit["severity"], "title": "Hidden character in a file or folder name",
+                             "path": e["path"], "detail": "Name with markers: " + reveal(e["path"])})
+    candidates = ctx.text_blobs()
+    selected, budget = [], max_bytes
+    for b in candidates:
+        if len(selected) >= max_files or b.get("size", 0) > budget:
+            break
+        selected.append(b)
+        budget -= b.get("size", 0)
+    not_covered = len(candidates) - len(selected)
+    scanned = skipped = 0
+    for path, res in ctx.fetch_many([b["path"] for b in selected]):
+        if "text" not in res:
+            skipped += 1
+            continue
+        scanned += 1
+        hit = scan_text(res["text"])
+        if not hit:
+            continue
+        summary = ", ".join(f"{n} × {k}" for k, n in hit["counts"].items())
+        findings.append({"severity": hit["severity"], "title": summary, "path": path,
+                         "line": hit["samples"][0]["line"] if hit["samples"] else None,
+                         "samples": [{"line": s["line"], "text": f"{s['codePoint']} col {s['column']}: {s['excerpt']}"} for s in hit["samples"]]})
+    notes.append(f"Scanned {scanned} text files and {len(ctx.entries)} names.")
+    if skipped:
+        notes.append(f"{skipped} files could not be read as text (binary, too large, or not served).")
+    if not_covered:
+        notes.append(f"{not_covered} files not read because of the size or count cap.")
+    if ctx.truncated:
+        notes.append("The file list from GitHub was truncated, so some files were never listed.")
+    return {"status": "partial" if not_covered or ctx.truncated else "ran", "notes": notes, "findings": findings}
+
+
+# ------------------------------------------------------------ S4 workflows
+
+UNTRUSTED = re.compile(r"github\.event\.(issue\.(title|body)|pull_request\.(title|body|head\.(ref|label|repo\.default_branch))|comment\.body|review\.body|review_comment\.body|pages\.[^.\s}]*\.page_name|commits\.[^.\s}]*\.(message|author\.(email|name))|head_commit\.(message|author\.(email|name))|discussion\.(title|body)|workflow_run\.(head_branch|display_title|head_commit\.(message|author\.(email|name))))|github\.head_ref")
+PR_HEAD_REF = re.compile(r"github\.event\.pull_request\.head\.(sha|ref)|github\.head_ref|refs/pull/|github\.event\.workflow_run\.head_(sha|branch)")
+SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _script_lines(lines):
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(\s*)(-\s+)?(run|script):\s*(.*)$", lines[i])
+        if m:
+            key_indent = len(m.group(1)) + (len(m.group(2)) if m.group(2) else 0)
+            rest = m.group(4)
+            if re.match(r"^[|>][+-]?\d*\s*(#.*)?$", rest):
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip() == "":
+                        continue
+                    if len(lines[j]) - len(lines[j].lstrip()) <= key_indent:
+                        break
+                    yield j + 1, lines[j]
+            elif rest:
+                yield i + 1, rest
+        i += 1
+
+
+def analyze_workflow(text):
+    lines = re.split(r"\r?\n", text)
+    findings = []
+    privileged = bool(re.search(r"^\s*-?\s*['\"]?(pull_request_target|workflow_run)['\"]?\s*:?", text, re.M)) or \
+        bool(re.search(r"\bon:\s*\[?[^\n]*\b(pull_request_target|workflow_run)\b", text))
+    pr_target = "pull_request_target" in text
+    on_pull_request = bool(re.search(r"\bpull_request(_target)?\b", text))
+
+    if pr_target:
+        idx = next((i for i, l in enumerate(lines) if "pull_request_target" in l), -1)
+        findings.append({"severity": "info", "title": "Uses pull_request_target, which runs with repository secrets on pull requests from forks", "line": idx + 1})
+
+    for i, l in enumerate(lines):
+        if re.match(r"^\s*ref:", l) and PR_HEAD_REF.search(l) and privileged:
+            findings.append({"severity": "high", "title": "Privileged workflow checks out pull request code",
+                             "detail": "A pull_request_target or workflow_run job that checks out the contributor's code can let that code run with secrets.",
+                             "line": i + 1, "snippet": l.strip()})
+
+    for line, src in _script_lines(lines):
+        for m in re.finditer(r"\$\{\{([^}]*)\}\}", src):
+            expr = m.group(1).strip()
+            if UNTRUSTED.search(expr):
+                findings.append({"severity": "high", "title": "Untrusted input expanded directly into a script",
+                                 "detail": f"${{{{ {expr} }}}} is controlled by whoever opens the issue, pull request or comment, and is pasted into the script before it runs.",
+                                 "line": line, "snippet": src.strip()})
+            elif re.search(r"github\.event\.|inputs\.", expr):
+                findings.append({"severity": "low", "title": "Event or input value expanded directly into a script",
+                                 "detail": f"${{{{ {expr} }}}}. Safer to pass it through an environment variable.",
+                                 "line": line, "snippet": src.strip()})
+
+    unpinned = []
+    for i, l in enumerate(lines):
+        m = re.match(r"^\s*(-\s+)?uses:\s*['\"]?([^@\s'\"]+)@([^\s'\"#]+)", l)
+        if not m:
+            continue
+        action, ref = m.group(2), m.group(3)
+        if action.startswith("./") or action.startswith("docker://"):
+            continue
+        if not SHA40.match(ref):
+            unpinned.append({"line": i + 1, "text": f"{action}@{ref}"})
+    if unpinned:
+        n = len(unpinned)
+        findings.append({"severity": "low", "title": f"{n} action{'s' if n > 1 else ''} pinned to a tag or branch rather than a commit SHA",
+                         "detail": "A tag can be moved to different code after you review it.", "line": unpinned[0]["line"], "samples": unpinned[:10]})
+
+    perm = next((i for i, l in enumerate(lines) if re.match(r"^\s*permissions:\s*write-all\b", l)), -1)
+    if perm != -1:
+        findings.append({"severity": "medium", "title": "Grants write-all permissions to the workflow token", "line": perm + 1})
+    elif not any(re.match(r"^permissions:", l) for l in lines):
+        findings.append({"severity": "info", "title": "No top-level permissions block, so jobs get the repository default token permissions"})
+
+    sh = next((i for i, l in enumerate(lines) if re.search(r"runs-on:.*self-hosted", l)), -1)
+    if sh != -1 and on_pull_request:
+        findings.append({"severity": "medium", "title": "Self-hosted runner used by a workflow that pull requests can trigger", "line": sh + 1})
+
+    inh = next((i for i, l in enumerate(lines) if re.match(r"^\s*secrets:\s*inherit\b", l)), -1)
+    if inh != -1:
+        findings.append({"severity": "info", "title": "Passes all secrets to a reusable workflow (secrets: inherit)", "line": inh + 1})
+    return findings
+
+
+def is_workflow_path(path):
+    return bool(re.match(r"^\.github/workflows/[^/]+\.ya?ml$", path, re.I))
+
+
+def run_workflows(ctx):
+    files = [e for e in ctx.entries if e["type"] == "blob" and is_workflow_path(e["path"])]
+    if not files:
+        return {"status": "partial" if ctx.truncated else "ran", "notes": ["No workflow files in .github/workflows."], "findings": []}
+    findings, unread = [], 0
+    for path, res in ctx.fetch_many([f["path"] for f in files]):
+        if "text" not in res:
+            unread += 1
+            continue
+        for f in analyze_workflow(res["text"]):
+            findings.append({**f, "path": path})
+    notes = [f"Read {len(files) - unread} of {len(files)} workflow files."]
+    if ctx.truncated:
+        notes.append("The file list from GitHub was truncated, so some workflows may be missing.")
+    return {"status": "partial" if unread or ctx.truncated else "ran", "notes": notes, "findings": findings}
+
+
+# --------------------------------------------------------------- S2 agents
+
+AGENT_KINDS = [
+    (r"(^|/)CLAUDE(\.local)?\.md$", "Claude Code instructions", "markdown", re.I),
+    (r"(^|/)AGENTS\.md$", "Agent instructions (AGENTS.md)", "markdown", re.I),
+    (r"(^|/)GEMINI\.md$", "Gemini CLI instructions", "markdown", re.I),
+    (r"(^|/)\.github/copilot-instructions\.md$", "Copilot instructions", "markdown", 0),
+    (r"(^|/)\.github/instructions/.+\.md$", "Copilot instructions", "markdown", 0),
+    (r"(^|/)\.cursorrules$", "Cursor rules", "markdown", 0),
+    (r"(^|/)\.cursor/rules/", "Cursor rules", "markdown", 0),
+    (r"(^|/)\.windsurfrules$", "Windsurf rules", "markdown", 0),
+    (r"(^|/)\.clinerules(/|$)", "Cline rules", "markdown", 0),
+    (r"(^|/)\.claude/settings(\.local)?\.json$", "Claude Code project settings", "claude-settings", 0),
+    (r"(^|/)\.claude/(agents|commands|skills|output-styles)/", "Claude Code agents, commands or skills", "markdown", 0),
+    (r"(^|/)\.claude/", "Claude Code project files", "other", 0),
+    (r"(^|/)\.mcp\.json$", "MCP server config", "mcp", 0),
+    (r"(^|/)\.cursor/mcp\.json$", "Cursor MCP server config", "mcp", 0),
+    (r"(^|/)\.vscode/mcp\.json$", "VS Code MCP server config", "mcp", 0),
+    (r"(^|/)\.vscode/tasks\.json$", "VS Code tasks", "vscode-tasks", 0),
+    (r"(^|/)\.vscode/settings\.json$", "VS Code workspace settings", "vscode-settings", 0),
+    (r"(^|/)\.devcontainer(\.json$|/.*devcontainer\.json$)", "Dev container config", "devcontainer", 0),
+]
+AGENT_KINDS = [(re.compile(p, f), label, kind) for p, label, kind, f in AGENT_KINDS]
+
+SUSPICIOUS = [
+    (re.compile(r"ignore (all |any )?(of )?(the )?(previous|prior|above|earlier) (instructions|rules)", re.I), "Tries to override earlier instructions"),
+    (re.compile(r"do not (tell|inform|mention|show|reveal)[^.\n]{0,40}(user|human|reviewer)", re.I), "Asks the agent to hide something from the user"),
+    (re.compile(r"(curl|wget)[^\n|]{0,200}\|\s*(ba|z)?sh\b", re.I), "Pipes a download into a shell"),
+    (re.compile(r"base64\s+(-d|--decode)", re.I), "Decodes base64, a common way to hide a payload"),
+    (re.compile(r"(exfiltrat|send (it|them|the [^.\n]{0,30}) to https?:)", re.I), "Mentions sending data out"),
+    (re.compile(r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.netrc|\.npmrc|GITHUB_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY)"), "Mentions credentials or key files"),
+    (re.compile(r"(--dangerously-skip-permissions|bypassPermissions|--yolo\b|auto-?approve)", re.I), "Mentions disabling agent permission checks"),
+]
+
+
+def classify_agent_path(path):
+    for rx, label, kind in AGENT_KINDS:
+        if rx.search(path):
+            return {"label": label, "kind": kind}
+    return None
+
+
+def _hook_commands(hooks):
+    out = []
+
+    def walk(v):
+        if isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, dict):
+            if isinstance(v.get("command"), str):
+                out.append(v["command"])
+            for x in v.values():
+                walk(x)
+    walk(hooks)
+    return out
+
+
+def analyze_agent_file(path, text):
+    info = classify_agent_path(path)
+    if not info:
+        return []
+    findings = []
+    data = None
+    if path.endswith(".json"):
+        try:
+            data = parse_jsonc(text)
+        except (ValueError, IndexError):
+            data = None
+    if not isinstance(data, dict):
+        data = None if data is None else {}
+    kind = info["kind"]
+    d = data or {}
+
+    if kind in ("markdown", "other"):
+        findings.append({"severity": "info", "title": f"{info['label']}: an agent reads this as guidance"})
+    elif kind == "claude-settings":
+        if d.get("hooks"):
+            cmds = _hook_commands(d["hooks"])
+            findings.append({"severity": "high", "title": "Defines Claude Code hooks, which run shell commands automatically",
+                             "samples": [{"text": truncate(c, 200)} for c in cmds[:10]]})
+        if d.get("enableAllProjectMcpServers") is True:
+            findings.append({"severity": "high", "title": "Turns on every MCP server in the project without asking"})
+        if d.get("apiKeyHelper"):
+            findings.append({"severity": "high", "title": "Sets apiKeyHelper, a command that runs to produce an API key", "detail": truncate(d["apiKeyHelper"], 200)})
+        status_line = d.get("statusLine")
+        if isinstance(status_line, dict) and status_line.get("command"):
+            findings.append({"severity": "medium", "title": "Sets a status line command that runs repeatedly", "detail": truncate(status_line["command"], 200)})
+        perms = d.get("permissions") if isinstance(d.get("permissions"), dict) else {}
+        allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
+        if allow:
+            bash = [p for p in allow if str(p).startswith("Bash")]
+            n = len(allow)
+            findings.append({"severity": "medium" if bash else "low",
+                             "title": f"Pre-approves {n} tool permission{'s' if n > 1 else ''}" + (f", {len(bash)} for shell commands" if bash else ""),
+                             "samples": [{"text": truncate(p, 200)} for p in allow[:10]]})
+        mode = perms.get("defaultMode")
+        if mode and mode != "default":
+            findings.append({"severity": "high", "title": f"Sets the default permission mode to {truncate(mode, 40)}"})
+        if data is None:
+            findings.append({"severity": "medium", "title": "Claude Code settings file that could not be parsed. Review it by hand."})
+    elif kind == "mcp":
+        servers = d.get("mcpServers") or d.get("servers") or {}
+        if not isinstance(servers, dict):
+            servers = {}
+        for name, cfg in servers.items():
+            cfg = cfg if isinstance(cfg, dict) else {}
+            if cfg.get("command"):
+                findings.append({"severity": "high", "title": f'MCP server "{truncate(name, 60)}" launches a local program',
+                                 "detail": truncate(f"{cfg['command']} {command_text(cfg.get('args') or [])}", 240)})
+            elif cfg.get("url"):
+                findings.append({"severity": "medium", "title": f'MCP server "{truncate(name, 60)}" connects to a remote URL', "detail": truncate(cfg["url"], 200)})
+        if data is None:
+            findings.append({"severity": "medium", "title": "MCP config that could not be parsed. Review it by hand."})
+        elif not servers:
+            findings.append({"severity": "info", "title": "MCP config with no servers listed"})
+    elif kind == "vscode-tasks":
+        tasks = d.get("tasks") if isinstance(d.get("tasks"), list) else []
+        on_open = [t for t in tasks if isinstance(t, dict) and isinstance(t.get("runOptions"), dict) and t["runOptions"].get("runOn") == "folderOpen"]
+        for t in on_open:
+            findings.append({"severity": "high", "title": "VS Code task runs automatically when the folder is opened",
+                             "detail": truncate(f"{t.get('label', '')}: {command_text(t.get('command', ''))} {command_text(t.get('args') or [])}", 240)})
+        if not on_open:
+            n = len(tasks)
+            findings.append({"severity": "info", "title": f"{n} VS Code task{'' if n == 1 else 's'} defined, none run on open"})
+    elif kind == "vscode-settings":
+        keys = [k for k in d if re.search(r"(path|executable|command|shell|interpreter)", k, re.I)]
+        if keys:
+            findings.append({"severity": "medium", "title": "Workspace settings point tools at programs or paths",
+                             "samples": [{"text": truncate(f"{k}: {command_text(d[k])}", 200)} for k in keys[:10]]})
+    elif kind == "devcontainer":
+        if d.get("initializeCommand"):
+            findings.append({"severity": "high", "title": "initializeCommand runs on your machine, outside the container", "detail": truncate(command_text(d["initializeCommand"]), 240)})
+        for key in ("onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand", "postAttachCommand"):
+            if d.get(key):
+                findings.append({"severity": "medium", "title": f"{key} runs inside the container", "detail": truncate(command_text(d[key]), 240)})
+
+    for i, l in enumerate(re.split(r"\r?\n", text)):
+        for rx, why in SUSPICIOUS:
+            if rx.search(l):
+                findings.append({"severity": "medium", "title": why, "line": i + 1, "snippet": truncate(l.strip(), 200)})
+    return findings
+
+
+def run_agents(ctx):
+    files = [e for e in ctx.entries if e["type"] == "blob" and classify_agent_path(e["path"])]
+    if not files:
+        return {"status": "partial" if ctx.truncated else "ran", "notes": ["No agent instruction, editor task or dev container files found."], "findings": []}
+    findings, unread = [], 0
+    for path, res in ctx.fetch_many([f["path"] for f in files[:200]]):
+        label = classify_agent_path(path)["label"]
+        if "text" not in res:
+            unread += 1
+            findings.append({"severity": "medium", "title": f"{label}: could not be read ({res['skipped']}). Review it by hand.", "path": path})
+            continue
+        for f in analyze_agent_file(path, res["text"]):
+            findings.append({**f, "path": path})
+    n = len(files)
+    notes = [f"Found {n} file{'s' if n > 1 else ''}."]
+    if n > 200:
+        notes.append("Only the first 200 were read.")
+    if ctx.truncated:
+        notes.append("The file list from GitHub was truncated, so some files may be missing.")
+    return {"status": "partial" if unread or n > 200 or ctx.truncated else "ran", "notes": notes, "findings": findings}
+
+
+# ---------------------------------------------------------------- S6 build
+
+SKIP_DIRS = re.compile(r"(^|/)(node_modules|vendor|third_party|\.git)/")
+BUILD_RULES = [
+    (r"(^|/)build\.rs$", "medium", "Cargo build script, runs on every cargo build or check"),
+    (r"(^|/)\.envrc$", "medium", "direnv script, runs when you enter the folder if direnv is allowed"),
+    (r"(^|/)setup\.py$", "medium", "Python setup script, runs on install from source"),
+    (r"(^|/)binding\.gyp$", "medium", "Native addon build, runs during npm install"),
+    (r"(^|/)(gradlew|mvnw)$", "low", "Build tool wrapper script"),
+    (r"(^|/)gradle/wrapper/gradle-wrapper\.jar$", "low", "Gradle wrapper binary, runs on build"),
+    (r"(^|/)\.mvn/wrapper/maven-wrapper\.jar$", "low", "Maven wrapper binary, runs on build"),
+    (r"(^|/)build\.gradle(\.kts)?$", "info", "Gradle build script"),
+    (r"(^|/)(GNUmakefile|[Mm]akefile)$", "info", "Makefile"),
+    (r"(^|/)CMakeLists\.txt$", "info", "CMake build script"),
+    (r"(^|/)meson\.build$", "info", "Meson build script"),
+    (r"(^|/)[Jj]ustfile$|(^|/)\.justfile$", "info", "just recipes"),
+    (r"(^|/)Taskfile\.ya?ml$", "info", "Task runner file"),
+    (r"(^|/)Rakefile$", "info", "Rake tasks"),
+    (r"(^|/)\.pre-commit-config\.yaml$", "info", "pre-commit hooks, run on git commit once installed"),
+    (r"(^|/)lefthook\.ya?ml$", "info", "Lefthook git hooks"),
+    (r"(^|/)\.husky/[^/]+$", "info", "Husky git hook, installed by npm install via the prepare script"),
+    (r"(^|/)\.githooks/[^/]+$", "info", "Git hook script"),
+    (r"(^|/)(Dockerfile|Containerfile)(\.[^/]+)?$", "info", "Container build file"),
+]
+BUILD_RULES = [(re.compile(p), s, t) for p, s, t in BUILD_RULES]
+INSTALL_SCRIPTS = ["preinstall", "install", "postinstall", "prepare", "prepublish", "preprepare", "postprepare"]
+
+
+def classify_build_path(path):
+    if SKIP_DIRS.search(path):
+        return None
+    for rx, sev, label in BUILD_RULES:
+        if rx.search(path):
+            return {"severity": sev, "label": label}
+    return None
+
+
+def install_scripts(text):
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    scripts = data.get("scripts") if isinstance(data, dict) and isinstance(data.get("scripts"), dict) else {}
+    return [{"name": k, "command": scripts[k]} for k in INSTALL_SCRIPTS if isinstance(scripts.get(k), str)]
+
+
+def run_build(ctx):
+    findings = []
+    blobs = [e for e in ctx.entries if e["type"] == "blob"]
+    for e in blobs:
+        c = classify_build_path(e["path"])
+        if c:
+            findings.append({"severity": c["severity"], "title": c["label"], "path": e["path"]})
+    pkgs = [e for e in blobs if re.search(r"(^|/)package\.json$", e["path"]) and not SKIP_DIRS.search(e["path"])][:100]
+    unread = 0
+    for path, res in ctx.fetch_many([p["path"] for p in pkgs]):
+        scripts = install_scripts(res["text"]) if "text" in res else None
+        if scripts is None:
+            unread += 1
+            continue
+        for s in scripts:
+            findings.append({"severity": "medium", "title": f'npm "{s["name"]}" script, runs automatically on install', "path": path, "snippet": s["command"][:240]})
+    notes = [f"Checked {len(blobs)} file paths and {len(pkgs) - unread} package.json files."]
+    if ctx.truncated:
+        notes.append("The file list from GitHub was truncated, so some files may be missing.")
+    return {"status": "partial" if unread or ctx.truncated else "ran", "notes": notes, "findings": findings}
+
+
+# ---------------------------------------------------------------- S1 setup
+
+POLICY = re.compile(r"^(\.github/|docs/)?security\.(md|markdown|txt|rst)$", re.I)
+
+
+def find_security_policy(entries):
+    found = [e["path"] for e in entries if e["type"] == "blob" and POLICY.match(e["path"])]
+    return sorted(found, key=lambda p: 0 if p.startswith(".github/") else (2 if "/" in p else 1))
+
+
+def _days(iso):
+    t = time.mktime(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+    return int((time.time() - t) // 86400)
+
+
+def run_setup(ctx):
+    m = ctx.meta
+    findings, notes, facts = [], [], []
+    partial = False
+    lic = m.get("license")
+    facts.append(["Description", m.get("description") or "None"])
+    facts.append(["Default branch", f"{m['default_branch']} at {ctx.sha[:12]}"])
+    facts.append(["Licence", lic["spdx_id"] if lic and lic.get("spdx_id") and lic["spdx_id"] != "NOASSERTION" else ("Present, not recognised" if lic else "None detected")])
+    facts.append(["Created", (m.get("created_at") or "")[:10]])
+    pushed = m.get("pushed_at") or ""
+    facts.append(["Last push", f"{pushed[:10]} ({_days(pushed)} days ago)" if pushed else "Unknown"])
+    facts.append(["Stars / forks", f"{m.get('stargazers_count')} / {m.get('forks_count')}"])
+
+    if m.get("archived"):
+        findings.append({"severity": "info", "title": "Archived. The owner no longer accepts changes."})
+    if m.get("fork"):
+        parent = (m.get("parent") or {}).get("full_name") or "another repository"
+        findings.append({"severity": "info", "title": f"Fork of {parent}. Security reports may belong upstream."})
+    if not lic:
+        findings.append({"severity": "low", "title": "No licence detected. Reuse rights are unclear."})
+    if pushed and _days(pushed) > 365:
+        findings.append({"severity": "low", "title": "No pushes in over a year"})
+
+    policies = find_security_policy(ctx.entries)
+    policy = None
+    if policies:
+        policy = policies[0]
+        facts.append(["Security policy", ", ".join(policies)])
+    else:
+        res = ctx.net.raw(ctx.owner, ".github", "HEAD", "SECURITY.md")
+        if "text" in res:
+            policy = f"{ctx.owner}/.github/SECURITY.md"
+            facts.append(["Security policy", f"Inherited from {ctx.owner}/.github"])
+        else:
+            facts.append(["Security policy", "None found"])
+            findings.append({"severity": "medium", "title": "No security policy (SECURITY.md) in the repository or the owner's .github repository"})
+
+    try:
+        pvr = ctx.net.api(f"/repos/{ctx.owner}/{ctx.repo}/private-vulnerability-reporting")
+        if pvr is None:
+            facts.append(["Private vulnerability reporting", "Unknown"])
+            partial = True
+            notes.append("GitHub did not return the private vulnerability reporting status.")
+        else:
+            facts.append(["Private vulnerability reporting", "Enabled" if pvr.get("enabled") else "Disabled"])
+            if not pvr.get("enabled"):
+                findings.append({"severity": "low" if policy else "medium", "title": "GitHub private vulnerability reporting is off. Check the security policy for another private route."})
+    except RateLimitError as e:
+        facts.append(["Private vulnerability reporting", "Not checked (rate limit)"])
+        partial = True
+        notes.append(str(e))
+
+    pr_policy = m.get("pull_request_creation_policy")
+    facts.append(["Pull requests", "Disabled" if m.get("has_pull_requests") is False else (f"Open to: {pr_policy}" if pr_policy else "Enabled")])
+    try:
+        pulls = ctx.net.api(f"/repos/{ctx.owner}/{ctx.repo}/pulls?state=open&per_page=100&sort=created&direction=asc")
+        if isinstance(pulls, list):
+            count = "100 or more" if len(pulls) == 100 else str(len(pulls))
+            oldest = f", oldest opened {_days(pulls[0]['created_at'])} days ago" if pulls else ""
+            facts.append(["Open pull requests", count + oldest])
+    except RateLimitError:
+        facts.append(["Open pull requests", "Not checked (rate limit)"])
+        partial = True
+    return {"status": "partial" if partial else "ran", "notes": notes, "findings": findings, "facts": facts}
+
+
+# ------------------------------------------------------------ S5 lockfiles
+
+def _toml_blocks(text):
+    blocks = re.split(r"^\[\[package\]\]\s*$", text, flags=re.M)[1:]
+    out = []
+    for b in blocks:
+        m = re.search(r"^\[", b, re.M)
+        out.append(b if not m else b[:m.start()])
+    return out
+
+
+def _toml_value(block, key):
+    m = re.search(r'^' + key + r'\s*=\s*"([^"]*)"', block, re.M)
+    return m.group(1) if m else None
+
+
+def parse_cargo_lock(text):
+    out = []
+    for b in _toml_blocks(text):
+        source = _toml_value(b, "source")
+        if not source or not source.startswith("registry+"):
+            continue
+        name, version = _toml_value(b, "name"), _toml_value(b, "version")
+        if name and version:
+            out.append({"ecosystem": "crates.io", "name": name, "version": version})
+    return out
+
+
+def parse_python_toml_lock(text):
+    out = []
+    for b in _toml_blocks(text):
+        if re.search(r"^source\s*=\s*\{\s*(editable|virtual|path|directory)\s*=", b, re.M):
+            continue
+        name, version = _toml_value(b, "name"), _toml_value(b, "version")
+        if name and version:
+            out.append({"ecosystem": "PyPI", "name": name, "version": version})
+    return out
+
+
+def parse_package_lock(text):
+    data = json.loads(text)
+    out = []
+    if data.get("packages"):
+        for key, pkg in data["packages"].items():
+            if not key or pkg.get("link") or not pkg.get("version"):
+                continue
+            idx = key.rfind("node_modules/")
+            name = pkg.get("name") or (None if idx == -1 else key[idx + len("node_modules/"):])
+            if name:
+                out.append({"ecosystem": "npm", "name": name, "version": pkg["version"]})
+    elif data.get("dependencies"):
+        def walk(deps):
+            for name, pkg in (deps or {}).items():
+                v = pkg.get("version")
+                if v and not re.match(r"^(file|link|git)", v):
+                    out.append({"ecosystem": "npm", "name": name, "version": v})
+                walk(pkg.get("dependencies"))
+        walk(data["dependencies"])
+    return out
+
+
+def _split_name_version(spec):
+    at = spec.rfind("@")
+    if at <= 0:
+        return None
+    return spec[:at], spec[at + 1:]
+
+
+def parse_pnpm_lock(text):
+    out = []
+    in_packages = False
+    for line in re.split(r"\r?\n", text):
+        if re.match(r"^\S", line):
+            in_packages = bool(re.match(r"^(packages|snapshots):", line))
+            continue
+        if not in_packages:
+            continue
+        m = re.match(r"""^ {2}(['"]?)(/?[^\s'"]+)\1:\s*$""", line)
+        if not m:
+            continue
+        spec = re.sub(r"\(.*$", "", re.sub(r"^/", "", m.group(2)))
+        nv = _split_name_version(spec)
+        if not nv:
+            slash = spec.rfind("/")
+            if slash > 0:
+                nv = (spec[:slash], spec[slash + 1:])
+        if nv and re.match(r"^\d", nv[1]):
+            out.append({"ecosystem": "npm", "name": nv[0], "version": re.sub(r"_.*$", "", nv[1])})
+    return out
+
+
+def parse_yarn_lock(text):
+    out = []
+    current = None
+    for line in re.split(r"\r?\n", text):
+        if re.match(r"^\S", line) and line.rstrip().endswith(":") and not line.startswith("#") and not line.startswith("__metadata"):
+            first = line.rstrip()[:-1].split(",")[0].strip().strip('"')
+            nv = _split_name_version(first)
+            current = nv[0] if nv else None
+            continue
+        v = re.match(r'^\s+version:?\s+"?([^"\s]+)"?\s*$', line)
+        if v and current:
+            out.append({"ecosystem": "npm", "name": current, "version": v.group(1)})
+            current = None
+    return out
+
+
+def parse_requirements(text):
+    out = []
+    for raw in re.split(r"\r?\n", text):
+        line = re.sub(r"#.*$", "", raw).strip()
+        m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*==\s*([A-Za-z0-9._+!-]+)", line)
+        if m:
+            out.append({"ecosystem": "PyPI", "name": m.group(1), "version": m.group(3)})
+    return out
+
+
+def parse_go_sum(text):
+    out = []
+    for line in re.split(r"\r?\n", text):
+        m = re.match(r"^(\S+)\s+(v[^\s/]+)\s+h1:", line)
+        if m:
+            out.append({"ecosystem": "Go", "name": m.group(1), "version": re.sub(r"\+incompatible$", "", m.group(2))})
+    return out
+
+
+def parse_gemfile_lock(text):
+    out = []
+    in_specs = False
+    for line in re.split(r"\r?\n", text):
+        if re.match(r"^\s{2}specs:\s*$", line):
+            in_specs = True
+            continue
+        if re.match(r"^\S", line):
+            in_specs = False
+        if not in_specs:
+            continue
+        m = re.match(r"^ {4}([A-Za-z0-9._-]+) \(([^)\s-]+)(-[^)]*)?\)\s*$", line)
+        if m:
+            out.append({"ecosystem": "RubyGems", "name": m.group(1), "version": m.group(2)})
+    return out
+
+
+def parse_composer_lock(text):
+    data = json.loads(text)
+    pkgs = (data.get("packages") or []) + (data.get("packages-dev") or [])
+    return [{"ecosystem": "Packagist", "name": p["name"], "version": re.sub(r"^v", "", p["version"])} for p in pkgs if p.get("name") and p.get("version")]
+
+
+LOCK_PARSERS = [
+    (r"(^|/)Cargo\.lock$", parse_cargo_lock),
+    (r"(^|/)package-lock\.json$", parse_package_lock),
+    (r"(^|/)npm-shrinkwrap\.json$", parse_package_lock),
+    (r"(^|/)pnpm-lock\.yaml$", parse_pnpm_lock),
+    (r"(^|/)yarn\.lock$", parse_yarn_lock),
+    (r"(^|/)(poetry|uv|pdm)\.lock$", parse_python_toml_lock),
+    (r"(^|/)requirements[^/]*\.txt$", parse_requirements),
+    (r"(^|/)go\.sum$", parse_go_sum),
+    (r"(^|/)Gemfile\.lock$", parse_gemfile_lock),
+    (r"(^|/)composer\.lock$", parse_composer_lock),
+]
+LOCK_PARSERS = [(re.compile(p), fn) for p, fn in LOCK_PARSERS]
+
+
+def lockfile_parser(path):
+    if SKIP_DIRS.search(path):
+        return None
+    for rx, fn in LOCK_PARSERS:
+        if rx.search(path):
+            return fn
+    return None
+
+
+# ------------------------------------------------------------ S5 deps
+
+def _osv_severity(v):
+    s = str(((v or {}).get("database_specific") or {}).get("severity") or "").lower()
+    if s in ("critical", "high"):
+        return "high"
+    if s in ("moderate", "medium"):
+        return "medium"
+    if s == "low":
+        return "low"
+    return "medium"
+
+
+def fetch_scorecard(net, owner, repo):
+    try:
+        status, data = net.get_json(f"https://api.securityscorecards.dev/projects/github.com/{owner}/{repo}", 2_000_000)
+    except ScanError:
+        return {"state": "error", "message": "Scorecard could not be reached."}
+    if status == 404:
+        return {"state": "not-scanned"}
+    if status != 200 or not isinstance(data, dict):
+        return {"state": "error", "message": f"Scorecard returned {status}."}
+    return {"state": "ok", "score": data.get("score"), "date": data.get("date"),
+            "checks": [{"name": c.get("name"), "score": c.get("score"), "reason": c.get("reason")} for c in (data.get("checks") or [])[:40]]}
+
+
+def run_deps(ctx):
+    notes, findings = [], []
+    scorecard = fetch_scorecard(ctx.net, ctx.owner, ctx.repo)
+    if scorecard["state"] == "not-scanned":
+        notes.append("Not scanned by OpenSSF Scorecard. That is common and is not a failure.")
+    elif scorecard["state"] == "error":
+        notes.append(scorecard["message"])
+    elif scorecard["state"] == "ok":
+        notes.append(f"OpenSSF Scorecard: {scorecard['score']} / 10 ({str(scorecard['date'])[:10]}).")
+
+    lockfiles = [e for e in ctx.entries if e["type"] == "blob" and lockfile_parser(e["path"])]
+    if not lockfiles:
+        notes.insert(0, "No supported lockfiles found (Cargo, npm, pnpm, Yarn, Poetry, uv, PDM, pip requirements, Go, Bundler, Composer).")
+        return {"status": "partial" if ctx.truncated else "ran", "notes": notes, "findings": findings, "scorecard": scorecard}
+
+    packages = {}
+    unreadable = 0
+    for path, res in ctx.fetch_many([l["path"] for l in lockfiles], max_bytes=LOCKFILE_MAX_BYTES):
+        if "text" not in res:
+            unreadable += 1
+            continue
+        try:
+            for p in lockfile_parser(path)(res["text"]):
+                key = f"{p['ecosystem']}|{p['name']}|{p['version']}"
+                packages.setdefault(key, {**p, "paths": []})["paths"].append(path)
+        except (ValueError, KeyError, AttributeError, TypeError):
+            unreadable += 1
+    notes.insert(0, f"Read {len(lockfiles) - unreadable} of {len(lockfiles)} lockfiles, {len(packages)} unique package versions.")
+
+    plist = list(packages.values())
+    hits, osv_failed = [], False
+    try:
+        for i in range(0, len(plist), 1000):
+            chunk = plist[i:i + 1000]
+            data = ctx.net.post_json("https://api.osv.dev/v1/querybatch",
+                                     {"queries": [{"package": {"name": p["name"], "ecosystem": p["ecosystem"]}, "version": p["version"]} for p in chunk]},
+                                     OSV_MAX_BYTES)
+            for j, r in enumerate((data.get("results") or [])[:len(chunk)]):
+                vulns = (r or {}).get("vulns") or []
+                if vulns:
+                    hits.append({"pkg": chunk[j], "ids": [str(v.get("id")) for v in vulns], "more": bool(r.get("next_page_token"))})
+    except (ScanError, ValueError) as e:
+        osv_failed = True
+        notes.append(f"Advisory lookup failed: {e}. Lockfiles were read but not checked.")
+
+    ids = list(dict.fromkeys(i for h in hits for i in h["ids"]))
+    details = {}
+
+    def detail(vid):
+        try:
+            status, data = ctx.net.get_json(f"https://api.osv.dev/v1/vulns/{urllib.parse.quote(vid, safe='')}", 1_000_000)
+            return vid, data if status == 200 else None
+        except ScanError:
+            return vid, None
+    with ThreadPoolExecutor(6) as ex:
+        for vid, data in ex.map(detail, ids[:60]):
+            details[vid] = data
+    if len(ids) > 60:
+        notes.append(f"{len(ids)} advisories matched. Details were fetched for the first 60.")
+
+    order = ["high", "medium", "low"]
+    for h in hits:
+        worst = "low"
+        for vid in h["ids"]:
+            s = _osv_severity(details.get(vid)) if details.get(vid) else "medium"
+            if order.index(s) < order.index(worst):
+                worst = s
+        p = h["pkg"]
+        n = len(h["ids"])
+        samples = []
+        for vid in h["ids"][:8]:
+            v = details.get(vid) or {}
+            aliases = v.get("aliases") or []
+            text = vid + (f" ({', '.join(aliases[:3])})" if aliases else "") + (f": {v['summary']}" if v.get("summary") else "")
+            samples.append({"text": truncate(text, 300), "osv": vid})
+        findings.append({"severity": worst,
+                         "title": f"{p['name']} {p['version']} ({p['ecosystem']}): {n}{'+' if h['more'] else ''} known advisor{'y' if n == 1 else 'ies'}",
+                         "path": p["paths"][0], "samples": samples})
+    if ctx.truncated:
+        notes.append("The file list from GitHub was truncated, so some lockfiles may be missing.")
+    return {"status": "partial" if osv_failed or unreadable or ctx.truncated else "ran", "notes": notes, "findings": findings, "scorecard": scorecard}
+
+
+# --------------------------------------------------------- S7 Omarchy plugin
+
+CODE_EXT = re.compile(r"\.(qml|js|mjs|sh|bash|py)$", re.I)
+PLUGIN_BINARY = re.compile(r"\.(so|dylib|dll|exe|node|wasm|pyc|qsb|a|o)$", re.I)
+QML_JS = re.compile(r"\.(qml|js|mjs)$", re.I)
+PLUGIN_RULES = [
+    (r"\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b", "high", "Downloads and runs a script in one step", CODE_EXT),
+    (r"\b(sudo|pkexec)\b", "high", "Uses sudo or pkexec", CODE_EXT),
+    (r"\bsetcap\b|\bchmod\s+[0-7]*[46][0-7]{3}\b", "high", "Changes file capabilities or setuid bits", CODE_EXT),
+    (r"\bStdioCollector\b", "medium", "Collects a child process's whole output before checking its size", re.compile(r"\.qml$", re.I)),
+    (r"""["'](ba)?sh["']\s*,\s*["']-l?c["']|\bexecDetached\(\s*["'`]|\bbar\.run\(""", "medium", "Runs a shell command string rather than an argument list", QML_JS),
+    (r"\bshell\s*=\s*True\b|\bos\.system\(", "medium", "Runs a shell command string from Python", re.compile(r"\.py$", re.I)),
+    (r"\bXMLHttpRequest\b", "medium", "Makes network requests from inside the shared shell process", QML_JS),
+    (r"\bcurl\b[^\n]*\s(-L|--location|-k|--insecure)\b|verify\s*=\s*False|CERT_NONE", "medium", "Follows redirects or skips TLS verification", CODE_EXT),
+    (r"""Authorization:\s*Bearer\s*\$|-u\s+["']?\$\w+:|\btoken=\$""", "medium", "May put a credential on a command line, where other processes can read it", CODE_EXT),
+    (r"releases/latest|\bgit\s+(clone|pull)\b|\b(pip|pipx|npm|cargo|go)\s+install\b|\b(yay|paru)\s+-S|\bpacman\s+-S", "medium", "Installs or fetches code at run time", CODE_EXT),
+    (r"\bsystemctl\s+(?!--user)(enable|start|restart|disable|stop|mask)\b", "medium", "Changes system services", CODE_EXT),
+    (r"""["'`]/tmp/|\$\{XDG_RUNTIME_DIR:-""", "low", "Uses a predictable shared temporary path", CODE_EXT),
+]
+PLUGIN_RULES = [(re.compile(p), s, t, f) for p, s, t, f in PLUGIN_RULES]
+
+
+def read_manifest(text):
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or "schemaVersion" not in data or not (data.get("entryPoints") or data.get("kinds")):
+        return None
+    return data
+
+
+def text_sinks_without_format(src):
+    lines = []
+    for m in re.finditer(r"\b(Text|Label|TextEdit)\s*\{", src):
+        i, depth = m.end(), 1
+        while i < len(src) and depth:
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+            i += 1
+        if not re.search(r"\btextFormat\s*:", src[m.end():i]):
+            lines.append(src.count("\n", 0, m.start()) + 1)
+    return lines
+
+
+def analyze_plugin_file(path, text):
+    findings = []
+    file_lines = re.split(r"\r?\n", text)
+    for rx, sev, title, filt in PLUGIN_RULES:
+        if not filt.search(path):
+            continue
+        hits = [{"line": i + 1, "text": l.strip()[:200]} for i, l in enumerate(file_lines)
+                if not re.match(r"^\s*(//|#|\*|/\*)", l) and rx.search(l)]
+        if hits:
+            findings.append({"severity": sev, "title": title, "path": path, "line": hits[0]["line"], "samples": hits[:5], "count": len(hits)})
+    if re.search(r"\.qml$", path, re.I):
+        missing = text_sinks_without_format(text)
+        if missing:
+            n = len(missing)
+            findings.append({"severity": "medium", "title": f"{n} Text item{'s' if n > 1 else ''} without textFormat: Text.PlainText",
+                             "detail": "Without it Qt may render markup, including image tags that make the shell fetch a URL.",
+                             "path": path, "line": missing[0], "samples": [{"line": l, "text": "Text without textFormat"} for l in missing[:5]], "count": n})
+    return findings
+
+
+def analyze_plugin_tree(entries, readme):
+    findings = []
+    blobs = [e for e in entries if e["type"] == "blob"]
+    if len(blobs) > 1000:
+        findings.append({"severity": "medium", "title": f"{len(blobs)} files, over the marketplace scanner's limit of 1000"})
+    for b in blobs:
+        if b.get("size", 0) > 512 * 1024 and b["path"] != "preview.png":
+            findings.append({"severity": "medium", "title": "File over the marketplace scanner's 512 KiB limit", "path": b["path"]})
+        if PLUGIN_BINARY.search(b["path"]):
+            findings.append({"severity": "medium", "title": "Compiled binary in the plugin, which reviewers cannot inspect", "path": b["path"]})
+    agent_files = [b for b in blobs if classify_agent_path(b["path"])]
+    if agent_files:
+        findings.append({"severity": "medium", "title": "Agent instruction files are installed with the plugin, into a folder coding agents read automatically",
+                         "samples": [{"text": b["path"]} for b in agent_files[:10]]})
+    if not any(re.match(r"^preview\.(png|jpe?g|webp|avif)$", b["path"], re.I) for b in blobs):
+        findings.append({"severity": "info", "title": "No preview image at the root"})
+    if readme is not None and not re.search(r"omarchy plugin remove\b", readme):
+        findings.append({"severity": "low", "title": "README does not explain removal with omarchy plugin remove"})
+    return findings
+
+
+def run_omarchy(ctx):
+    if not any(e["type"] == "blob" and e["path"] == "manifest.json" for e in ctx.entries):
+        return {"status": "not-applicable", "notes": ["Not an Omarchy plugin: there is no manifest.json at the root."], "findings": []}
+    res = ctx.fetch_text("manifest.json")
+    manifest = read_manifest(res["text"]) if "text" in res else None
+    if not manifest:
+        return {"status": "not-applicable", "notes": ["manifest.json is not an Omarchy plugin manifest."], "findings": []}
+    kinds = manifest.get("kinds")
+    facts = [["Plugin id", str(manifest.get("id", "missing"))], ["Name", str(manifest.get("name", "missing"))],
+             ["Version", str(manifest.get("version", "missing"))], ["Kinds", ", ".join(map(str, kinds)) if isinstance(kinds, list) else "missing"]]
+    readme_entry = next((e for e in ctx.entries if e["type"] == "blob" and re.match(r"^readme(\.md)?$", e["path"], re.I)), None)
+    readme = ctx.fetch_text(readme_entry["path"]).get("text") if readme_entry else None
+    findings = analyze_plugin_tree(ctx.entries, readme)
+    code = [e for e in ctx.entries if e["type"] == "blob" and CODE_EXT.search(e["path"]) and e.get("size", 0) <= 1_000_000][:500]
+    unread = 0
+    for path, r in ctx.fetch_many([c["path"] for c in code]):
+        if "text" not in r:
+            unread += 1
+            continue
+        findings.extend(analyze_plugin_file(path, r["text"]))
+    notes = ["Omarchy plugin detected. These checks follow the marketplace review rules and are pattern matches, not a review.",
+             f"Read {len(code) - unread} of {len(code)} code files."]
+    return {"status": "partial" if unread or ctx.truncated else "ran", "notes": notes, "findings": findings, "facts": facts}
+
+
+# ------------------------------------------------------------------- scan
+
+CHECKS = [
+    ("S1", "Repository setup", run_setup),
+    ("S2", "Agent instruction files", run_agents),
+    ("S3", "Hidden Unicode", run_unicode),
+    ("S4", "GitHub Actions", run_workflows),
+    ("S5", "Dependencies", run_deps),
+    ("S6", "Build-time code", run_build),
+    ("S7", "Omarchy plugin", run_omarchy),
+]
+RUN_ORDER = ["S1", "S2", "S4", "S6", "S7", "S5", "S3"]
+
+
+class Context:
+    def __init__(self, net, owner, repo, meta, sha, tree):
+        self.net, self.owner, self.repo, self.meta, self.sha = net, owner, repo, meta, sha
+        self.entries = [e for e in tree.get("tree", []) if isinstance(e, dict) and isinstance(e.get("path"), str)]
+        self.truncated = bool(tree.get("truncated"))
+        self._cache = {}
+        self._lock = threading.Lock()
+
+    def text_blobs(self):
+        return [e for e in self.entries if e["type"] == "blob" and extension(e["path"]) not in BINARY_EXT and e.get("size", 0) <= RAW_MAX_BYTES]
+
+    def fetch_text(self, path, max_bytes=RAW_MAX_BYTES):
+        key = (path, max_bytes)
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        res = self.net.raw(self.owner, self.repo, self.sha, path, max_bytes)
+        with self._lock:
+            self._cache[key] = res
+        return res
+
+    def fetch_many(self, paths, max_bytes=RAW_MAX_BYTES):
+        with ThreadPoolExecutor(12) as ex:
+            return list(zip(paths, ex.map(lambda p: self.fetch_text(p, max_bytes), paths)))
+
+
+def _bound_result(result):
+    findings = sorted(result.get("findings", []), key=lambda f: SEVERITIES.index(f["severity"]))
+    if len(findings) > REPORT_MAX_FINDINGS:
+        result.setdefault("notes", []).append(f"{len(findings) - REPORT_MAX_FINDINGS} lower-severity findings were left out of this report.")
+        findings = findings[:REPORT_MAX_FINDINGS]
+    for f in findings:
+        for k in ("title", "detail", "snippet", "path"):
+            if f.get(k) is not None:
+                f[k] = truncate(f[k], 400)
+        if f.get("samples"):
+            f["samples"] = [{**s, "text": truncate(s.get("text", ""), 300)} for s in f["samples"][:10]]
+    result["findings"] = findings
+    return result
+
+
+def scan(target, token=None):
+    ids = parse_repo_input(target)
+    net = Net(token)
+    owner, repo = ids["owner"], ids["repo"]
+    meta = net.api(f"/repos/{owner}/{repo}")
+    if not meta:
+        raise ScanError(f"{owner}/{repo} was not found. It may be private, renamed, or misspelled.")
+    if meta.get("private"):
+        raise ScanError("This repository is private. Luddite Scout only reviews public repositories.")
+    branch = net.api(f"/repos/{owner}/{repo}/branches/{urllib.parse.quote(meta['default_branch'], safe='')}")
+    if not branch:
+        raise ScanError("The default branch could not be read.")
+    sha = branch["commit"]["sha"]
+    if not SHA40.match(sha):
+        raise ScanError("GitHub returned an unexpected commit id.")
+    tree = net.api(f"/repos/{owner}/{repo}/git/trees/{sha}?recursive=1")
+    if not tree:
+        raise ScanError("The file list could not be read.")
+    owner, repo = meta["owner"]["login"], meta["name"]
+    ctx = Context(net, owner, repo, meta, sha, tree)
+
+    results = {}
+    for cid in RUN_ORDER:
+        cid_, name, fn = next(c for c in CHECKS if c[0] == cid)
+        try:
+            results[cid] = _bound_result(fn(ctx))
+        except RateLimitError as e:
+            results[cid] = {"status": "skipped", "notes": [str(e)], "findings": []}
+        except Exception as e:  # one check failing must not hide the others
+            results[cid] = {"status": "skipped", "notes": [f"This check failed: {truncate(e, 200)}"], "findings": []}
+
+    return {
+        "tool": "luddite-scout", "version": VERSION,
+        "repository": f"{owner}/{repo}", "commit": sha,
+        "api": {"calls": net.calls, "remaining": net.remaining, "limit": net.limit},
+        "checks": [{"id": cid, "name": name, **results[cid]} for cid, name, _ in CHECKS],
+    }
+
+
+# ------------------------------------------------------------------- output
+
+def format_text(report):
+    out = [f"{report['repository']} at {report['commit']}"]
+    for c in report["checks"]:
+        counts = {}
+        for f in c["findings"]:
+            counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+        summary = ", ".join(f"{counts[s]} {s}" for s in SEVERITIES if counts.get(s))
+        out.append("")
+        out.append(f"{c['id']} {c['name']}: {c['status']}" + (f" ({summary})" if summary else ""))
+        for n in c.get("notes", []):
+            out.append(f"  {n}")
+        for k, v in c.get("facts", []):
+            out.append(f"  {k}: {v}")
+        for f in c["findings"]:
+            loc = f" [{f['path']}{':' + str(f['line']) if f.get('line') else ''}]" if f.get("path") else ""
+            out.append(f"  {f['severity'].upper():6} {f['title']}{loc}")
+    api = report["api"]
+    out.append("")
+    out.append(f"GitHub API: {api['calls']} requests used, {api['remaining']} of {api['limit']} left this hour.")
+    return "\n".join(out)
+
+
+JSON_MAX_CHARS = 1_500_000
+
+
+# The Omarchy panel refuses output over 2,000,000 characters, so the JSON
+# report drops its lowest-severity findings until it fits well under that.
+def bounded_json(report):
+    out = json.dumps(report, ensure_ascii=False)
+    while len(out) > JSON_MAX_CHARS:
+        longest = max(report["checks"], key=lambda c: len(c["findings"]))
+        if not longest["findings"]:
+            break
+        keep = len(longest["findings"]) // 2
+        longest.setdefault("notes", []).append(f"{len(longest['findings']) - keep} lower-severity findings were left out to keep the report small.")
+        longest["findings"] = longest["findings"][:keep]
+        out = json.dumps(report, ensure_ascii=False)
+    return out
+
+
+def main(argv):
+    args = [a for a in argv if not a.startswith("--")]
+    flags = {a for a in argv if a.startswith("--")}
+    unknown = flags - {"--json", "--token-stdin", "--help", "--version"}
+    if "--help" in flags or unknown or len(args) != 1:
+        if "--version" in flags and not args:
+            print(VERSION)
+            return 0
+        print(__doc__.strip(), file=sys.stderr)
+        return 0 if "--help" in flags else 2
+    token = None
+    if "--token-stdin" in flags:
+        token = sys.stdin.readline(512).strip() or None
+        if token and not re.fullmatch(r"[A-Za-z0-9_]{20,255}", token):
+            print("That does not look like a GitHub token.", file=sys.stderr)
+            return 2
+    try:
+        report = scan(args[0], token)
+    except ValueError as e:
+        msg, code = str(e), 2
+    except ScanError as e:
+        msg, code = str(e), 1
+    else:
+        if "--json" in flags:
+            print(bounded_json(report))
+        else:
+            print(format_text(report))
+        return 0
+    if "--json" in flags:
+        print(json.dumps({"tool": "luddite-scout", "version": VERSION, "error": msg}))
+    else:
+        print(msg, file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
