@@ -133,5 +133,34 @@ class Network(unittest.TestCase):
         self.assertEqual(scout.parse_jsonc('{ // c\n "a": "x//y", /* b */ "b": [1,], }'), {"a": "x//y", "b": [1]})
 
 
+class TerminalOutput(unittest.TestCase):
+    # An OSC 52 clipboard write, a C1 CSI, DEL, a bidi override and a tag
+    # character, as a repository could put them in a server name or a path.
+    HOSTILE = "\x1b]52;c;SGVsbG8=\x07\x9b31m\x7f\u202e\U000e0041"
+
+    def report(self):
+        findings = scout._mcp_findings({self.HOSTILE: {"command": "node"}})
+        findings.append({"severity": "low", "rule": "S6.husky", "title": "t", "path": self.HOSTILE, "line": 1})
+        return {"repository": "o/r", "commit": "a" * 40,
+                "api": {"calls": 1, "remaining": 59, "limit": 60, "authenticated": False, "tokenRejected": False},
+                "checks": [{"id": "S2", "name": "Agent instruction files", "status": "ran", "findings": findings,
+                            "notes": [self.HOSTILE], "facts": [[self.HOSTILE, self.HOSTILE]]}]}
+
+    def test_readable_report_shows_controls_as_code_points(self):
+        out = scout.format_text(self.report())
+        self.assertIsNone(scout.TERMINAL_UNSAFE.search(out.replace("\n", "")))
+        for cp in ("U+001B", "U+0007", "U+009B", "U+007F", "U+202E", "U+E0041"):
+            self.assertIn("⟦%s⟧" % cp, out)
+
+    def test_json_report_escapes_controls_and_parses_back(self):
+        report = self.report()
+        out = scout.bounded_json(report)
+        self.assertIsNone(scout.TERMINAL_UNSAFE.search(out))
+        self.assertEqual(json.loads(out)["checks"][0]["notes"], [self.HOSTILE])
+
+    def test_error_message_is_escaped(self):
+        self.assertEqual(scout.term_safe("a\x1bb\nc"), "a⟦U+001B⟧b⟦U+000A⟧c")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 ALLOWED_HOSTS = {"api.github.com", "raw.githubusercontent.com", "api.osv.dev", "api.securityscorecards.dev"}
 DEADLINE_SECONDS = 180
 API_MAX_BYTES = 8_000_000
@@ -1673,6 +1673,23 @@ def scan(target, token=None):
 
 # ------------------------------------------------------------------- output
 
+# The readable report and error messages quote text the scanned repository
+# controls: names, paths, titles and facts. A terminal acts on control
+# characters (an OSC 52 sequence can write the clipboard), so every C0 and C1
+# control, DEL, line and paragraph separator, and every HIDDEN character is
+# shown as ⟦U+XXXX⟧ instead. JSON escapes C0 itself, and the rest is escaped as
+# \uXXXX so the report stays inert when printed and parses to the same text.
+TERMINAL_UNSAFE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]|" + HIDDEN.pattern)
+
+
+def term_safe(v):
+    return TERMINAL_UNSAFE.sub(lambda m: "⟦%s⟧" % code_point(m.group(0)), str(v))
+
+
+def json_safe(out):
+    return TERMINAL_UNSAFE.sub(lambda m: json.dumps(m.group(0))[1:-1], out)
+
+
 def format_text(report):
     out = [f"{report['repository']} at {report['commit']}"]
     for c in report["checks"]:
@@ -1695,7 +1712,7 @@ def format_text(report):
     out.append(f"GitHub API ({who}): {api['calls']} requests used, {api['remaining']} of {api['limit']} left this hour.")
     if api.get("tokenRejected"):
         out.append("GitHub rejected the token, so the scan continued without it.")
-    return "\n".join(out)
+    return "\n".join(term_safe(line) for line in out)
 
 
 JSON_MAX_CHARS = 1_500_000
@@ -1704,7 +1721,7 @@ JSON_MAX_CHARS = 1_500_000
 # The Omarchy panel refuses output over 2,000,000 characters, so the JSON
 # report drops its lowest-severity findings until it fits well under that.
 def bounded_json(report):
-    out = json.dumps(report, ensure_ascii=False)
+    out = json_safe(json.dumps(report, ensure_ascii=False))
     while len(out) > JSON_MAX_CHARS:
         longest = max(report["checks"], key=lambda c: len(c["findings"]))
         if not longest["findings"]:
@@ -1712,7 +1729,7 @@ def bounded_json(report):
         keep = len(longest["findings"]) // 2
         longest.setdefault("notes", []).append(f"{len(longest['findings']) - keep} lower-severity findings were left out to keep the report small.")
         longest["findings"] = longest["findings"][:keep]
-        out = json.dumps(report, ensure_ascii=False)
+        out = json_safe(json.dumps(report, ensure_ascii=False))
     return out
 
 
@@ -2013,7 +2030,7 @@ def main(argv):
     if "--json" in flags:
         print(json.dumps({"tool": "luddite-scout", "version": VERSION, "error": msg}))
     else:
-        print(msg, file=sys.stderr)
+        print(term_safe(msg), file=sys.stderr)
     return code
 
 
