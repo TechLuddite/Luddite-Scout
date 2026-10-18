@@ -4,12 +4,55 @@ A pre-flight check for a public GitHub repository, run before you point a coding
 
 **Status:** experimental, under active development.
 
+![The Luddite Scout panel open under the Omarchy bar, showing a report for TechLuddite/luddite-gestures](docs/screenshots/omarchy-desktop.png)
+
 Four ways to use it, all running the same checks:
 
-- **Website:** https://techluddite.github.io/Luddite-Scout/. Everything runs in your browser.
-- **Terminal:** `bin/scout owner/repo`. One Python file, standard library only.
-- **Omarchy:** a bar widget and panel for the Omarchy desktop.
-- **Agent skill:** `luddite-scout.skill` for Claude Code and the Claude apps. The agent gets a summary with no text from the scanned repository.
+| Front end | How | Documentation |
+| --- | --- | --- |
+| Website | https://techluddite.github.io/Luddite-Scout/. Everything runs in your browser. | [docs/website.md](docs/website.md) |
+| Terminal | `bin/scout owner/repo`. One Python file, standard library only. | [docs/terminal.md](docs/terminal.md) |
+| Omarchy | A bar widget and panel for the Omarchy desktop. | [docs/omarchy-plugin.md](docs/omarchy-plugin.md) |
+| Agent skill | `luddite-scout.skill` for Claude Code and the Claude apps, from [luddite-scout-skill](https://github.com/TechLuddite/luddite-scout-skill). The agent gets a summary with no text from the scanned repository. | [docs/agent-skill.md](docs/agent-skill.md) |
+
+## What it checks
+
+| Check | Looks for |
+| --- | --- |
+| S1 Repository setup | Security policy, private vulnerability reporting, licence, archive and fork status |
+| S2 Agent instruction files | CLAUDE.md, AGENTS.md, GEMINI.md, `.claude/`, `.mcp.json` and similar, and where they redirect an agent |
+| S3 Hidden Unicode | Bidirectional controls, tag characters and zero-width characters |
+| S4 GitHub Actions | Risky triggers, untrusted input in `run:` steps, unpinned actions, broad permissions |
+| S5 Dependencies | Lockfiles checked against OSV, and the OpenSSF Scorecard result |
+| S6 Build-time code | Code that runs on install, build or entry |
+| S7 Omarchy plugin | The patterns the Omarchy plugin marketplace reviewers block most often |
+
+Findings are pattern matches for a person to judge. A clean report is not proof that a repository is safe. [docs/checks.md](docs/checks.md) has the full list, what each status means, and example reports.
+
+## Omarchy plugin
+
+```sh
+omarchy plugin add https://github.com/TechLuddite/Luddite-Scout
+omarchy plugin enable io.github.techluddite.luddite-scout
+```
+
+To remove it:
+
+```sh
+omarchy plugin remove io.github.techluddite.luddite-scout
+```
+
+The plugin keeps no state, cache, credentials or configuration, so nothing is left behind. See [docs/omarchy-plugin.md](docs/omarchy-plugin.md) for what it runs and what it contacts.
+
+## Documentation
+
+- [Checks](docs/checks.md)
+- [Website](docs/website.md)
+- [Terminal](docs/terminal.md)
+- [Omarchy plugin](docs/omarchy-plugin.md)
+- [Agent skill](docs/agent-skill.md)
+- [Limitations and data handling](docs/data-handling.md)
+- [Development](docs/development.md)
 
 ## Credits
 
@@ -27,174 +70,6 @@ Research the checks are based on:
 - [ASCII Smuggler Tool: Crafting Invisible Text and Decoding Hidden Codes](https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/) on the Embrace The Red blog, on Unicode tag characters used to hide instructions from people while AI models still read them (S3).
 - GitHub Security Lab on [pwn requests](https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/) and [untrusted input](https://securitylab.github.com/resources/github-actions-untrusted-input/), and GitHub's [security hardening guide for Actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions) (S4).
 - The review history of the [Omarchy plugin marketplace](https://github.com/omacom/omarchy-plugin-marketplace), for the patterns its reviewers block most often (S7).
-
-## What it checks
-
-| Check | What it looks for |
-| --- | --- |
-| S1 Repository setup | Security policy, private vulnerability reporting, licence, archive and fork status, open pull requests |
-| S2 Agent instruction files | CLAUDE.md, AGENTS.md, GEMINI.md, `.claude/`, `.agents/`, `.gemini/`, `.mcp.json`, editor tasks that run on open, dev container commands. Cross-checks: whether CLAUDE.md, AGENTS.md and GEMINI.md in one folder match or point to each other, or give different agents different instructions. Redirects: `@` imports (including ones outside the repository or from a web address), symbolic links, files the instructions mention, renamed Gemini CLI instruction files, extra folders and endpoint changes in settings, and HTML comments GitHub hides. Files that instructions send an agent to are scanned too |
-| S3 Hidden Unicode | Bidirectional controls, tag characters and zero-width characters in file contents and names |
-| S4 GitHub Actions | `pull_request_target` checking out PR code, untrusted input inside `run:` steps, unpinned actions, broad permissions |
-| S5 Dependencies | Lockfiles checked against [OSV](https://osv.dev), plus the [OpenSSF Scorecard](https://scorecard.dev) result where one exists |
-| S6 Build-time code | `build.rs`, npm install scripts, `setup.py`, `.envrc` and other code that runs on install, build or entry |
-| S7 Omarchy plugin | Only for repositories that are Omarchy plugins: markup-rendering `Text` items, uncapped process output, shell command strings, `sudo`, run-time installs, agent files shipped with the plugin |
-
-S1 to S6 apply to any repository. S7 reports "not applicable" unless the repository has an Omarchy plugin manifest at its root.
-
-Each check reports whether it ran in full, ran partially, was skipped, or does not apply, with the reason. A skipped check is never shown as a pass. Findings are pattern matches for a human to judge. A clean report is not proof that a repository is safe.
-
-## What a report looks like
-
-These examples scan the author's own repositories.
-
-The summary for [TechLuddite/NetReady](https://github.com/TechLuddite/NetReady), a website project, so S7 does not apply:
-
-![Website report summary for TechLuddite/NetReady, listing S1 to S7 with their status and finding counts](docs/screenshots/website-summary.png)
-
-The S7 card for [TechLuddite/luddite-gestures](https://github.com/TechLuddite/luddite-gestures), an Omarchy plugin, with each finding linked to the line it came from:
-
-![S7 Omarchy plugin card for TechLuddite/luddite-gestures, showing four medium findings with file and line links](docs/screenshots/website-omarchy-check.png)
-
-## Website
-
-Open https://techluddite.github.io/Luddite-Scout/ and enter `owner/repo` or a GitHub URL. To run your own copy there is no build step:
-
-```sh
-git clone https://github.com/TechLuddite/Luddite-Scout.git
-cd Luddite-Scout
-python3 -m http.server 8000
-```
-
-## Terminal
-
-`bin/scout` needs only Python 3, with no packages to install. It is tested with Python 3.14.
-
-```sh
-bin/scout owner/repo                              # readable report
-bin/scout --json owner/repo                       # JSON report
-bin/scout --agent owner/repo                      # summary for a coding agent, no repository text
-bin/scout --gh-token owner/repo                   # use the GitHub CLI's login for a higher rate limit
-gh auth token | bin/scout --token-stdin owner/repo  # or pass any token on standard input
-```
-
-A token never goes on the command line or into the environment, where other processes could read it. `--gh-token` finds the `gh` you run by default without installing anything: it asks mise (`mise which gh`, which is how Omarchy installs `gh`) and falls back to `/usr/bin/gh`. It then runs `gh auth token` and keeps the result inside the scanner process. If GitHub rejects a token, the scan continues anonymously and the report says so. The JSON report is capped at about 1.5 MB. The lowest-severity findings are dropped first, and the report says when that happened. The readable report and the website show every finding.
-
-## Omarchy plugin
-
-```sh
-omarchy plugin add https://github.com/TechLuddite/Luddite-Scout
-omarchy plugin enable io.github.techluddite.luddite-scout
-```
-
-The bar icon opens a panel. Type a repository, press Enter, and the panel runs `bin/scout --json` under `/usr/bin/timeout` and shows the report.
-
-![The Luddite Scout panel on Omarchy showing a report for TechLuddite/luddite-gestures](preview.png)
-
-The panel shows up to eight findings per check, and the website or terminal shows the rest. If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that login, which raises GitHub's limit from 60 to 5,000 requests an hour. The token stays inside `bin/scout` and is sent only to `api.github.com`. Without a login the panel works anonymously. The plugin needs `/usr/bin/python3`, has no settings, and writes no files.
-
-To remove it:
-
-```sh
-omarchy plugin remove io.github.techluddite.luddite-scout
-```
-
-Nothing is left behind: the plugin keeps no state, cache, credentials or configuration outside its own folder.
-
-## Agent skill
-
-The skill lets a coding agent check a repository before it touches it, without reading anything the repository wrote. A repository under review may be hostile, and its instruction files, file names, settings and package metadata are exactly where it would put text aimed at an agent. The skill keeps that text out of the agent's context.
-
-### Install
-
-Download `luddite-scout.skill` from the [latest release](https://github.com/TechLuddite/Luddite-Scout/releases/latest). A new release is built by CI whenever a change to `bin/scout`, `skill/` or `LICENSE` reaches `main`. Before installing, check that the file came from this repository's CI:
-
-```sh
-gh attestation verify luddite-scout.skill --repo TechLuddite/Luddite-Scout
-```
-
-Claude Code:
-
-```sh
-unzip luddite-scout.skill -d ~/.claude/skills/
-```
-
-Claude apps: upload the file under Customize, Skills. This has not been tested yet. The script needs HTTPS access to the four hosts below, and code execution in the Claude apps may not allow them.
-
-To build it yourself, run `skill/build.sh`. It writes `dist/luddite-scout.skill`, and the same commit always gives the same file.
-
-### How it works
-
-The skill runs `scout --agent owner/repo`. That mode prints only:
-
-- rule IDs such as `S2.hooks`, with a fixed description written by Luddite Scout
-- severity, status and counts
-- the repository name you asked for and the commit hash that was scanned
-- the command for the full report
-
-File names, file contents, line text, settings values, MCP server names, script names, repository descriptions and advisory summaries are never printed. Before printing, `scout` checks every string in its output against an allowlist of those fixed values. If anything else gets through, it prints a `guard` error instead of the report. Errors are fixed codes too, because an error message can quote the repository.
-
-`test/test_agent_mode.py` runs the real scan against a fake repository with injection text in every name, file, setting, description and advisory. It checks that the text appears in the full report and nowhere in the agent report.
-
-You read the detail. The agent's summary ends with a command such as `python3 -I -S ~/.claude/skills/luddite-scout/scripts/scout owner/repo`. Run it in a separate terminal. Do not run it with the `!` prefix in Claude Code, because that puts its output, repository text included, into the conversation.
-
-### What it does not protect against
-
-The guardrails are listed at the top of `skill/SKILL.md` and in the skill's description, so the agent sees them before it decides to use the skill. Only the first is enforced by code.
-
-| | Gap | Status |
-| --- | --- | --- |
-| G1 | The agent can still read the repository with its other tools: web fetch, `git clone`, `gh`, `curl`, or search results that quote the README. | Instruction only. See hardening below. |
-| G2 | You can paste repository text into the conversation yourself, or run the full report with `!`. | Instruction only. The skill tells the agent not to ask for it. |
-| G3 | The agent knows which rules fired and how often, but not which file or why. It can't advise on a specific line. | By design. The detail is for you. |
-| G4 | The repository name is printed. You typed it, and GitHub limits names to letters, digits, `.`, `-` and `_`, but a name can still read like an instruction. | Accepted. |
-| G5 | The scan covers one commit of the default branch. The repository can change after the scan. | The commit hash in the output records what was scanned. |
-| G6 | The skill runs `scout` with network access on your machine. A compromised release would run with your permissions. | Check the attestation before installing. Releases are built only from `main` after tests pass. |
-| G7 | `allowed-tools` pre-approves only the scan command, and only in Claude Code. Other clients will ask you to approve it. | Expected. |
-| G8 | A summary with no findings is not proof that a repository is safe. Findings are pattern matches. | The output and the skill both say so. |
-
-### Hardening G1 in Claude Code
-
-To make it harder for the agent to read a repository during a review, run the review from a dedicated folder with a `.claude/settings.json` like this:
-
-```json
-{
-  "permissions": {
-    "deny": [
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:*.github.com)",
-      "WebFetch(domain:*.githubusercontent.com)",
-      "Bash(git clone *)",
-      "Bash(gh repo *)",
-      "Bash(gh api *)",
-      "Bash(curl *)",
-      "Bash(wget *)"
-    ]
-  }
-}
-```
-
-Deny rules take precedence over allow rules. Claude Code's [permissions documentation](https://code.claude.com/docs/en/permissions) says Bash deny rules match the command as Claude writes it, not every way of running the same program, so treat them as a speed bump rather than a boundary. A sandbox network allowlist can't close the gap either, because `scout` needs the same GitHub hosts the agent would use to read the repository.
-
-## Limitations and data handling
-
-- Public repositories only, default branch only.
-- Without a token, GitHub allows 60 API requests an hour per address. A review uses about five. File contents come from `raw.githubusercontent.com`, which does not count against that limit.
-- Files over 1 MB and binary files are not scanned for hidden characters. Very large repositories may be covered partially, and the report says so.
-- No AI model is used and no code from the scanned repository is run.
-
-All three front ends contact the same four hosts and no others: `api.github.com`, `raw.githubusercontent.com`, `api.osv.dev` (package names and versions from lockfiles) and `api.securityscorecards.dev` (the repository name). Those services see your IP address and what you looked up. The website's Content Security Policy and `bin/scout`'s host allowlist block every other host, and `bin/scout` refuses redirects. Results are not stored or shareable by link. See [about.html](about.html) for the full statement.
-
-## Development
-
-```sh
-npm test        # node --test and python3 -m unittest, no packages to install
-npm run serve   # python3 -m http.server 8000
-```
-
-The checks exist twice: in `js/checks/` for the website and in `bin/scout` for the terminal, the panel and the skill. Both run the same cases from `test/fixtures/cases.json`, and finding titles must match, so a rule changed in one place and not the other fails the tests. A further test runs S3 over this repository itself.
-
-Every finding in `bin/scout` carries a `rule` ID from the `RULES` table, which `--agent` mode uses in place of the title. A new finding needs a new entry there, and the shared-case tests fail if a finding has no known rule. `skill/SKILL.md` is the skill's source, and `skill/build.sh` packages it with `bin/scout`. The `release-skill` job in `.github/workflows/test.yml` runs the build and publishes the release.
 
 ## Help and security
 
