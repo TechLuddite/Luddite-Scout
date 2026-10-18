@@ -37,6 +37,12 @@ RAW_MAX_BYTES = 1_000_000
 LOCKFILE_MAX_BYTES = 20_000_000
 OSV_MAX_BYTES = 10_000_000
 REPORT_MAX_FINDINGS = 200
+# GitHub tokens: classic ghp_/gho_/ghu_ (40 chars) and the ghs_APPID_JWT installation
+# format that the Actions GITHUB_TOKEN uses since 2026-04. That one measured 377
+# chars, GitHub documents ~520 and variable, and its JWT segments add "." and "-".
+# ASCII only, no whitespace or control characters.
+TOKEN_MAX_CHARS = 1024
+TOKEN = re.compile(r"[A-Za-z0-9_.-]{20,%d}" % TOKEN_MAX_CHARS)
 SEVERITIES = ["high", "medium", "low", "info"]
 RANK = {"info": 0, "low": 1, "medium": 2, "high": 3}
 
@@ -1965,11 +1971,11 @@ def gh_token():
             env[name] = os.environ[name]
     try:
         out = subprocess.run([gh, "auth", "token", "--hostname", "github.com"], cwd=home, env=env, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10).stdout[:512]
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10).stdout[:TOKEN_MAX_CHARS + 2]
     except (OSError, subprocess.SubprocessError):
         return None
     token = out.decode("ascii", "replace").strip()
-    return token if re.fullmatch(r"[A-Za-z0-9_]{20,255}", token) else None
+    return token if TOKEN.fullmatch(token) else None
 
 
 def main(argv):
@@ -1984,8 +1990,8 @@ def main(argv):
         return 0 if "--help" in flags else 2
     token = None
     if "--token-stdin" in flags:
-        token = sys.stdin.readline(512).strip() or None
-        if token and not re.fullmatch(r"[A-Za-z0-9_]{20,255}", token):
+        token = sys.stdin.readline(TOKEN_MAX_CHARS + 2).strip() or None
+        if token and not TOKEN.fullmatch(token):
             print("That does not look like a GitHub token.", file=sys.stderr)
             return 2
     elif "--gh-token" in flags:
