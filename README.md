@@ -22,7 +22,7 @@ Four ways to use it, all running the same checks:
 | S1 Repository setup | Security policy, private vulnerability reporting, licence, archive and fork status |
 | S2 Agent instruction files | CLAUDE.md, AGENTS.md, GEMINI.md, `.claude/`, `.mcp.json` and similar, and where they redirect an agent |
 | S3 Hidden Unicode | Bidirectional controls, tag characters and zero-width characters |
-| S4 GitHub Actions | Risky triggers, untrusted input in `run:` steps, unpinned actions, broad permissions |
+| S4 GitHub Actions | Risky triggers, untrusted input in `run:` steps, unpinned actions, broad permissions, in GitHub, Gitea and Forgejo workflows and composite `action.yml` files |
 | S5 Dependencies | Lockfiles checked against OSV, and the OpenSSF Scorecard result |
 | S6 Build-time code | Code that runs on install, build or entry |
 | S7 Omarchy plugin | The patterns the Omarchy plugin marketplace reviewers block most often |

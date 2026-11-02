@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { parseRepoInput } from '../js/lib/repo-url.js';
 import { parseJsonc, looksBinary, lineAt } from '../js/lib/text.js';
 import { scanText, reveal } from '../js/checks/unicode.js';
-import { analyzeWorkflow } from '../js/checks/workflows.js';
+import { analyzeWorkflow, classifyWorkflowPath } from '../js/checks/workflows.js';
 import { analyzeAgentFile, classifyAgentPath, resolveRef, followTargets, crossCheckAgents } from '../js/checks/agents.js';
 import { classifyBuildPath, installScripts } from '../js/checks/build.js';
 import { findSecurityPolicy } from '../js/checks/setup.js';
@@ -52,7 +52,9 @@ test('unicode', () => {
 });
 
 test('workflows', () => {
-  for (const c of cases.workflow) assertFindings(analyzeWorkflow(text(c.text)), c);
+  for (const c of cases.workflow) assertFindings(analyzeWorkflow(text(c.text), c.kind || 'workflow'), c);
+  for (const c of cases.workflow_forge_contexts) assertFindings(analyzeWorkflow(text(c.text)), c);
+  for (const c of cases.workflow_path) assert.equal(classifyWorkflowPath(c.path), c.kind, c.path);
 });
 
 test('agent files', () => {

@@ -370,8 +370,8 @@ def run_unicode(ctx, max_files=4000, max_bytes=60_000_000):
 
 # ------------------------------------------------------------ S4 workflows
 
-UNTRUSTED = re.compile(r"github\.event\.(issue\.(title|body)|pull_request\.(title|body|head\.(ref|label|repo\.default_branch))|comment\.body|review\.body|review_comment\.body|pages\.[^.\s}]*\.page_name|commits\.[^.\s}]*\.(message|author\.(email|name))|head_commit\.(message|author\.(email|name))|discussion\.(title|body)|workflow_run\.(head_branch|display_title|head_commit\.(message|author\.(email|name))))|github\.head_ref")
-PR_HEAD_REF = re.compile(r"github\.event\.pull_request\.head\.(sha|ref)|github\.head_ref|refs/pull/|github\.event\.workflow_run\.head_(sha|branch)")
+UNTRUSTED = re.compile(r"(?:github|gitea|forgejo|forge)\.event\.(issue\.(title|body)|pull_request\.(title|body|head\.(ref|label|repo\.default_branch))|comment\.body|review\.body|review_comment\.body|pages\.[^.\s}]*\.page_name|commits\.[^.\s}]*\.(message|author\.(email|name))|head_commit\.(message|author\.(email|name))|discussion\.(title|body)|workflow_run\.(head_branch|display_title|head_commit\.(message|author\.(email|name))))|(?:github|gitea|forgejo|forge)\.head_ref")
+PR_HEAD_REF = re.compile(r"(?:github|gitea|forgejo|forge)\.event\.pull_request\.head\.(sha|ref)|(?:github|gitea|forgejo|forge)\.head_ref|refs/pull/|(?:github|gitea|forgejo|forge)\.event\.workflow_run\.head_(sha|branch)")
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -394,9 +394,49 @@ def _script_lines(lines):
         i += 1
 
 
-def analyze_workflow(text):
+def _script_findings(lines):
+    findings = []
+    for line, src in _script_lines(lines):
+        for m in re.finditer(r"\$\{\{([^}]*)\}\}", src):
+            expr = m.group(1).strip()
+            if UNTRUSTED.search(expr):
+                findings.append({"severity": "high", "rule": "S4.untrusted-input-in-script", "title": "Untrusted input expanded directly into a script",
+                                 "detail": f"${{{{ {expr} }}}} is controlled by whoever opens the issue, pull request or comment, and is pasted into the script before it runs.",
+                                 "line": line, "snippet": src.strip()})
+            elif re.search(r"(?:github|gitea|forgejo|forge)\.event\.|inputs\.", expr):
+                findings.append({"severity": "low", "rule": "S4.event-input-in-script", "title": "Event or input value expanded directly into a script",
+                                 "detail": f"${{{{ {expr} }}}}. Safer to pass it through an environment variable.",
+                                 "line": line, "snippet": src.strip()})
+    return findings
+
+
+def _unpinned_findings(lines):
+    findings = []
+    unpinned = []
+    for i, l in enumerate(lines):
+        m = re.match(r"^\s*(-\s+)?uses:\s*['\"]?([^@\s'\"]+)@([^\s'\"#]+)", l)
+        if not m:
+            continue
+        action, ref = m.group(2), m.group(3)
+        if action.startswith("./") or action.startswith("docker://"):
+            continue
+        if not SHA40.match(ref):
+            unpinned.append({"line": i + 1, "text": f"{action}@{ref}"})
+    if unpinned:
+        n = len(unpinned)
+        findings.append({"severity": "low", "rule": "S4.unpinned-action", "title": f"{n} action{'s' if n > 1 else ''} pinned to a tag or branch rather than a commit SHA",
+                         "detail": "A tag can be moved to different code after you review it.", "line": unpinned[0]["line"], "samples": unpinned[:10]})
+    return findings
+
+
+def analyze_workflow(text, kind="workflow"):
+    """kind is "workflow" or "action" (a composite action.yml). An action has
+    no triggers, permissions or runner of its own, so only the script and
+    pinning checks apply to it."""
     lines = re.split(r"\r?\n", text)
     findings = []
+    if kind == "action":
+        return _script_findings(lines) + _unpinned_findings(lines)
     privileged = bool(re.search(r"^\s*-?\s*['\"]?(pull_request_target|workflow_run)['\"]?\s*:?", text, re.M)) or \
         bool(re.search(r"\bon:\s*\[?[^\n]*\b(pull_request_target|workflow_run)\b", text))
     pr_target = "pull_request_target" in text
@@ -412,32 +452,8 @@ def analyze_workflow(text):
                              "detail": "A pull_request_target or workflow_run job that checks out the contributor's code can let that code run with secrets.",
                              "line": i + 1, "snippet": l.strip()})
 
-    for line, src in _script_lines(lines):
-        for m in re.finditer(r"\$\{\{([^}]*)\}\}", src):
-            expr = m.group(1).strip()
-            if UNTRUSTED.search(expr):
-                findings.append({"severity": "high", "rule": "S4.untrusted-input-in-script", "title": "Untrusted input expanded directly into a script",
-                                 "detail": f"${{{{ {expr} }}}} is controlled by whoever opens the issue, pull request or comment, and is pasted into the script before it runs.",
-                                 "line": line, "snippet": src.strip()})
-            elif re.search(r"github\.event\.|inputs\.", expr):
-                findings.append({"severity": "low", "rule": "S4.event-input-in-script", "title": "Event or input value expanded directly into a script",
-                                 "detail": f"${{{{ {expr} }}}}. Safer to pass it through an environment variable.",
-                                 "line": line, "snippet": src.strip()})
-
-    unpinned = []
-    for i, l in enumerate(lines):
-        m = re.match(r"^\s*(-\s+)?uses:\s*['\"]?([^@\s'\"]+)@([^\s'\"#]+)", l)
-        if not m:
-            continue
-        action, ref = m.group(2), m.group(3)
-        if action.startswith("./") or action.startswith("docker://"):
-            continue
-        if not SHA40.match(ref):
-            unpinned.append({"line": i + 1, "text": f"{action}@{ref}"})
-    if unpinned:
-        n = len(unpinned)
-        findings.append({"severity": "low", "rule": "S4.unpinned-action", "title": f"{n} action{'s' if n > 1 else ''} pinned to a tag or branch rather than a commit SHA",
-                         "detail": "A tag can be moved to different code after you review it.", "line": unpinned[0]["line"], "samples": unpinned[:10]})
+    findings += _script_findings(lines)
+    findings += _unpinned_findings(lines)
 
     perm = next((i for i, l in enumerate(lines) if re.match(r"^\s*permissions:\s*write-all\b", l)), -1)
     if perm != -1:
@@ -455,22 +471,28 @@ def analyze_workflow(text):
     return findings
 
 
-def is_workflow_path(path):
-    return bool(re.match(r"^\.github/workflows/[^/]+\.ya?ml$", path, re.I))
+def classify_workflow_path(path):
+    """"workflow" for a GitHub, Gitea or Forgejo workflow file, "action" for a
+    composite action.yml, or None."""
+    if re.match(r"^\.(github|gitea|forgejo)/workflows/[^/]+\.ya?ml$", path, re.I):
+        return "workflow"
+    if re.search(r"(^|/)action\.ya?ml$", path, re.I) and not SKIP_DIRS.search(path):
+        return "action"
+    return None
 
 
 def run_workflows(ctx):
-    files = [e for e in ctx.entries if e["type"] == "blob" and is_workflow_path(e["path"])]
+    files = [e for e in ctx.entries if e["type"] == "blob" and classify_workflow_path(e["path"])]
     if not files:
-        return {"status": "partial" if ctx.truncated else "ran", "notes": ["No workflow files in .github/workflows."], "findings": []}
+        return {"status": "partial" if ctx.truncated else "ran", "notes": ["No workflow files (.github, .gitea or .forgejo) and no action.yml files."], "findings": []}
     findings, unread = [], 0
     for path, res in ctx.fetch_many([f["path"] for f in files]):
         if "text" not in res:
             unread += 1
             continue
-        for f in analyze_workflow(res["text"]):
+        for f in analyze_workflow(res["text"], classify_workflow_path(path)):
             findings.append({**f, "path": path})
-    notes = [f"Read {len(files) - unread} of {len(files)} workflow files."]
+    notes = [f"Read {len(files) - unread} of {len(files)} workflow and action files."]
     if ctx.truncated:
         notes.append("The file list from GitHub was truncated, so some workflows may be missing.")
     return {"status": "partial" if unread or ctx.truncated else "ran", "notes": notes, "findings": findings}

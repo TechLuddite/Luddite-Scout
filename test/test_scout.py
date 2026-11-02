@@ -58,7 +58,11 @@ class SharedCases(unittest.TestCase):
 
     def test_workflows(self):
         for c in CASES["workflow"]:
+            self.assert_findings(scout.analyze_workflow(text(c["text"]), c.get("kind", "workflow")), c)
+        for c in CASES["workflow_forge_contexts"]:
             self.assert_findings(scout.analyze_workflow(text(c["text"])), c)
+        for c in CASES["workflow_path"]:
+            self.assertEqual(scout.classify_workflow_path(c["path"]), c["kind"], c["path"])
 
     def test_agent_files(self):
         for c in CASES["agent_path"]:

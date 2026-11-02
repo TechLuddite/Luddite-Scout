@@ -1,9 +1,11 @@
-// S4. Line-based checks over GitHub Actions workflow files. This is not a YAML
+// S4. Line-based checks over GitHub, Gitea and Forgejo workflow files and
+// composite action.yml files. This is not a YAML
 // parser. It looks for the patterns behind most real Actions compromises.
 
-const UNTRUSTED = /github\.event\.(issue\.(title|body)|pull_request\.(title|body|head\.(ref|label|repo\.default_branch))|comment\.body|review\.body|review_comment\.body|pages\.[^.\s}]*\.page_name|commits\.[^.\s}]*\.(message|author\.(email|name))|head_commit\.(message|author\.(email|name))|discussion\.(title|body)|workflow_run\.(head_branch|display_title|head_commit\.(message|author\.(email|name))))|github\.head_ref/;
-const PR_HEAD_REF = /github\.event\.pull_request\.head\.(sha|ref)|github\.head_ref|refs\/pull\/|github\.event\.workflow_run\.head_(sha|branch)/;
+const UNTRUSTED = /(?:github|gitea|forgejo|forge)\.event\.(issue\.(title|body)|pull_request\.(title|body|head\.(ref|label|repo\.default_branch))|comment\.body|review\.body|review_comment\.body|pages\.[^.\s}]*\.page_name|commits\.[^.\s}]*\.(message|author\.(email|name))|head_commit\.(message|author\.(email|name))|discussion\.(title|body)|workflow_run\.(head_branch|display_title|head_commit\.(message|author\.(email|name))))|(?:github|gitea|forgejo|forge)\.head_ref/;
+const PR_HEAD_REF = /(?:github|gitea|forgejo|forge)\.event\.pull_request\.head\.(sha|ref)|(?:github|gitea|forgejo|forge)\.head_ref|refs\/pull\/|(?:github|gitea|forgejo|forge)\.event\.workflow_run\.head_(sha|branch)/;
 const SHA = /^[0-9a-f]{40}$/;
+const SKIP_DIRS = /(^|\/)(node_modules|vendor|third_party|\.git)\//;
 
 function indentOf(line) {
   return line.length - line.trimStart().length;
@@ -29,8 +31,61 @@ function* scriptLines(lines) {
   }
 }
 
-export function analyzeWorkflow(text) {
+function scriptFindings(lines) {
+  const findings = [];
+  for (const { line, text: src } of scriptLines(lines)) {
+    for (const m of src.matchAll(/\$\{\{([^}]*)\}\}/g)) {
+      const expr = m[1].trim();
+      if (UNTRUSTED.test(expr)) {
+        findings.push({
+          severity: 'high',
+          title: 'Untrusted input expanded directly into a script',
+          detail: `\${{ ${expr} }} is controlled by whoever opens the issue, pull request or comment, and is pasted into the script before it runs.`,
+          line,
+          snippet: src.trim(),
+        });
+      } else if (/(?:github|gitea|forgejo|forge)\.event\.|inputs\./.test(expr)) {
+        findings.push({
+          severity: 'low',
+          title: 'Event or input value expanded directly into a script',
+          detail: `\${{ ${expr} }}. Safer to pass it through an environment variable.`,
+          line,
+          snippet: src.trim(),
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+function unpinnedFindings(lines) {
+  const findings = [];
+  const unpinned = [];
+  lines.forEach((l, i) => {
+    const m = l.match(/^\s*(-\s+)?uses:\s*['"]?([^@\s'"]+)@([^\s'"#]+)/);
+    if (!m) return;
+    const [, , action, ref] = m;
+    if (action.startsWith('./') || action.startsWith('docker://')) return;
+    if (!SHA.test(ref)) unpinned.push({ line: i + 1, text: `${action}@${ref}` });
+  });
+  if (unpinned.length) {
+    findings.push({
+      severity: 'low',
+      title: `${unpinned.length} action${unpinned.length > 1 ? 's' : ''} pinned to a tag or branch rather than a commit SHA`,
+      detail: 'A tag can be moved to different code after you review it.',
+      line: unpinned[0].line,
+      samples: unpinned.slice(0, 10),
+    });
+  }
+  return findings;
+}
+
+// kind is 'workflow' or 'action' (a composite action.yml). An action has no
+// triggers, permissions or runner of its own, so only the script and pinning
+// checks apply to it.
+export function analyzeWorkflow(text, kind = 'workflow') {
   const lines = text.split(/\r?\n/);
+  if (kind === 'action') return [...scriptFindings(lines), ...unpinnedFindings(lines)];
   const findings = [];
   const privileged = /^\s*-?\s*['"]?(pull_request_target|workflow_run)['"]?\s*:?/m.test(text) ||
     /\bon:\s*\[?[^\n]*\b(pull_request_target|workflow_run)\b/.test(text);
@@ -57,46 +112,7 @@ export function analyzeWorkflow(text) {
     }
   });
 
-  for (const { line, text: src } of scriptLines(lines)) {
-    for (const m of src.matchAll(/\$\{\{([^}]*)\}\}/g)) {
-      const expr = m[1].trim();
-      if (UNTRUSTED.test(expr)) {
-        findings.push({
-          severity: 'high',
-          title: 'Untrusted input expanded directly into a script',
-          detail: `\${{ ${expr} }} is controlled by whoever opens the issue, pull request or comment, and is pasted into the script before it runs.`,
-          line,
-          snippet: src.trim(),
-        });
-      } else if (/github\.event\.|inputs\./.test(expr)) {
-        findings.push({
-          severity: 'low',
-          title: 'Event or input value expanded directly into a script',
-          detail: `\${{ ${expr} }}. Safer to pass it through an environment variable.`,
-          line,
-          snippet: src.trim(),
-        });
-      }
-    }
-  }
-
-  const unpinned = [];
-  lines.forEach((l, i) => {
-    const m = l.match(/^\s*(-\s+)?uses:\s*['"]?([^@\s'"]+)@([^\s'"#]+)/);
-    if (!m) return;
-    const [, , action, ref] = m;
-    if (action.startsWith('./') || action.startsWith('docker://')) return;
-    if (!SHA.test(ref)) unpinned.push({ line: i + 1, text: `${action}@${ref}` });
-  });
-  if (unpinned.length) {
-    findings.push({
-      severity: 'low',
-      title: `${unpinned.length} action${unpinned.length > 1 ? 's' : ''} pinned to a tag or branch rather than a commit SHA`,
-      detail: 'A tag can be moved to different code after you review it.',
-      line: unpinned[0].line,
-      samples: unpinned.slice(0, 10),
-    });
-  }
+  findings.push(...scriptFindings(lines), ...unpinnedFindings(lines));
 
   const perm = lines.findIndex((l) => /^\s*permissions:\s*write-all\b/.test(l));
   if (perm !== -1) {
@@ -125,23 +141,27 @@ export function analyzeWorkflow(text) {
   return findings;
 }
 
-export function isWorkflowPath(path) {
-  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(path);
+// 'workflow' for a GitHub, Gitea or Forgejo workflow file, 'action' for a
+// composite action.yml, or null.
+export function classifyWorkflowPath(path) {
+  if (/^\.(github|gitea|forgejo)\/workflows\/[^/]+\.ya?ml$/i.test(path)) return 'workflow';
+  if (/(^|\/)action\.ya?ml$/i.test(path) && !SKIP_DIRS.test(path)) return 'action';
+  return null;
 }
 
 export async function runWorkflows(ctx) {
-  const files = ctx.entries.filter((e) => e.type === 'blob' && isWorkflowPath(e.path));
+  const files = ctx.entries.filter((e) => e.type === 'blob' && classifyWorkflowPath(e.path));
   if (!files.length) {
-    return { status: ctx.truncated ? 'partial' : 'ran', notes: ['No workflow files in .github/workflows.'], findings: [] };
+    return { status: ctx.truncated ? 'partial' : 'ran', notes: ['No workflow files (.github, .gitea or .forgejo) and no action.yml files.'], findings: [] };
   }
   const findings = [];
   let unread = 0;
   const texts = await ctx.fetchMany(files.map((f) => f.path));
   for (const [path, res] of texts) {
     if (!res.text) { unread++; continue; }
-    for (const f of analyzeWorkflow(res.text)) findings.push({ ...f, path });
+    for (const f of analyzeWorkflow(res.text, classifyWorkflowPath(path))) findings.push({ ...f, path });
   }
-  const notes = [`Read ${files.length - unread} of ${files.length} workflow files.`];
+  const notes = [`Read ${files.length - unread} of ${files.length} workflow and action files.`];
   if (ctx.truncated) notes.push('The file list from GitHub was truncated, so some workflows may be missing.');
   return { status: unread || ctx.truncated ? 'partial' : 'ran', notes, findings };
 }

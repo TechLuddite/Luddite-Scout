@@ -47,7 +47,68 @@
         { "severity": "medium", "title": "Self-hosted runner" },
         { "severity": "info", "title": "secrets: inherit" }
       ]
+    },
+    {
+      "name": "composite action: input in run, unpinned uses, no permissions block expected",
+      "kind": "action",
+      "text": "name: demo\nruns:\n  using: composite\n  steps:\n    - uses: actions/setup-node@v6\n    - shell: bash\n      run: echo \"${{ inputs.target }}\"\n",
+      "has": [
+        { "severity": "low", "title": "Event or input value expanded directly into a script", "line": 7 },
+        { "severity": "low", "title": "pinned to a tag or branch" }
+      ],
+      "lacks": ["No top-level permissions block", "pull_request_target"]
+    },
+    {
+      "name": "composite action that mentions pull_request_target in a description",
+      "kind": "action",
+      "text": "description: Run on pull_request_target with care\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+      "has": [],
+      "lacks": ["pull_request_target"]
+    },
+    {
+      "name": "composite action expands untrusted event text",
+      "kind": "action",
+      "text": "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo \"${{ github.event.pull_request.title }}\"\n",
+      "has": [
+        { "severity": "high", "title": "Untrusted input expanded directly into a script", "line": 5 }
+      ]
     }
+  ],
+
+  "workflow_forge_contexts": [
+    {
+      "name": "Gitea context: untrusted title in run",
+      "text": "on: pull_request\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ gitea.event.pull_request.title }}\"\n",
+      "has": [{ "severity": "high", "title": "Untrusted input expanded directly into a script", "line": 7 }]
+    },
+    {
+      "name": "Forgejo forge context: head_ref in run",
+      "text": "on: pull_request\npermissions: {}\njobs:\n  a:\n    runs-on: docker\n    steps:\n      - run: git log ${{ forge.head_ref }}\n",
+      "has": [{ "severity": "high", "title": "Untrusted input expanded directly into a script", "line": 7 }]
+    },
+    {
+      "name": "Forgejo context: privileged checkout of the PR head",
+      "text": "on:\n  pull_request_target:\npermissions: {}\njobs:\n  a:\n    runs-on: docker\n    steps:\n      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\n        with:\n          ref: ${{ forgejo.event.pull_request.head.sha }}\n",
+      "has": [{ "severity": "high", "title": "Privileged workflow checks out pull request code", "line": 10 }]
+    },
+    {
+      "name": "Gitea context: other event value in run",
+      "text": "on: pull_request\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ gitea.event.number }}\n",
+      "has": [{ "severity": "low", "title": "Event or input value expanded directly into a script", "line": 7 }]
+    }
+  ],
+
+  "workflow_path": [
+    { "path": ".github/workflows/ci.yml", "kind": "workflow" },
+    { "path": ".gitea/workflows/ci.yaml", "kind": "workflow" },
+    { "path": ".forgejo/workflows/test.yml", "kind": "workflow" },
+    { "path": ".gitea/workflows/sub/ci.yml", "kind": null },
+    { "path": "action.yml", "kind": "action" },
+    { "path": ".github/actions/setup/action.yaml", "kind": "action" },
+    { "path": "node_modules/x/action.yml", "kind": null },
+    { "path": "vendor/a/action.yml", "kind": null },
+    { "path": "docs/action.yml.md", "kind": null },
+    { "path": "README.md", "kind": null }
   ],
 
   "agent_path": [
