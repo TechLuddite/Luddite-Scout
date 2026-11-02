@@ -10,6 +10,9 @@ Reviews a public GitHub repository with the same checks as the web page
                                 counts only, no text from the repository
     scout --token-stdin ...     read a GitHub token from stdin, never argv
     scout --gh-token ...        use the token of the signed-in GitHub CLI (gh)
+    scout --dir PATH            scan a local checkout instead, with the same
+                                checks except repository settings (S1);
+                                --name owner/repo and --commit SHA label it
 
 It runs nothing from the scanned repository. It only talks to four fixed
 HTTPS hosts, refuses redirects, caps every response while reading it, and
@@ -20,6 +23,7 @@ import json
 import os
 import re
 import ssl
+import stat
 import subprocess
 import sys
 import threading
@@ -1083,6 +1087,8 @@ def _days(iso):
 
 
 def run_setup(ctx):
+    if ctx.meta is None:
+        return {"status": "not-applicable", "notes": ["Local scan: repository settings are only read for a GitHub repository."], "findings": []}
     m = ctx.meta
     findings, notes, facts = [], [], []
     partial = False
@@ -1394,7 +1400,11 @@ def fetch_scorecard(net, owner, repo):
 
 def run_deps(ctx):
     notes, findings = [], []
-    scorecard = fetch_scorecard(ctx.net, ctx.owner, ctx.repo)
+    if ctx.owner is None:
+        scorecard = {"state": "local"}
+        notes.append("Local scan: OpenSSF Scorecard is not read.")
+    else:
+        scorecard = fetch_scorecard(ctx.net, ctx.owner, ctx.repo)
     if scorecard["state"] == "not-scanned":
         notes.append("Not scanned by OpenSSF Scorecard. That is common and is not a failure.")
     elif scorecard["state"] == "error":
@@ -1616,6 +1626,122 @@ class Context:
             return list(zip(paths, ex.map(lambda p: self.fetch_text(p, max_bytes), paths)))
 
 
+LOCAL_MAX_ENTRIES = 100_000
+
+
+class LocalContext(Context):
+    """A checked-out tree on disk, for --dir. Same interface as Context.
+
+    It lists the tree without following symbolic links, skips the top-level
+    .git, and opens every path one component at a time from a directory
+    descriptor with O_NOFOLLOW, so neither a link nor a directory swapped for
+    a link while it runs can make it read outside the tree. Only regular files
+    are read. A link is reported with its target as its text, as
+    raw.githubusercontent.com does for a link in a repository. Nothing is run:
+    not git, not anything from the tree. The tree is taken as it is on disk,
+    untracked and ignored files included, so it matches a GitHub scan only for
+    a clean checkout."""
+
+    DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    def __init__(self, root, net=None, name=None, sha=None):
+        self.root = os.path.realpath(root)
+        try:
+            self._root_fd = os.open(self.root, self.DIR_FLAGS)
+        except OSError:
+            raise ScanError("That directory does not exist or cannot be read.")
+        entries, truncated = [], False
+        stack = [""]
+        while stack and not truncated:
+            rel_dir = stack.pop()
+            try:
+                fd = self._open_dir(rel_dir)
+                with os.scandir(fd) as it:
+                    names = []
+                    for d in it:
+                        names.append(d.name)
+                        if len(names) + len(entries) > LOCAL_MAX_ENTRIES:
+                            truncated = True
+                            break
+            except OSError:
+                truncated = True
+                continue
+            subdirs = []
+            for n in sorted(names):
+                if rel_dir == "" and n == ".git":
+                    continue
+                rel = f"{rel_dir}/{n}" if rel_dir else n
+                try:
+                    st = os.stat(n, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    truncated = True
+                    continue
+                if stat.S_ISLNK(st.st_mode):
+                    entries.append({"path": rel, "type": "blob", "mode": "120000", "size": st.st_size})
+                elif stat.S_ISDIR(st.st_mode):
+                    entries.append({"path": rel, "type": "tree", "mode": "040000"})
+                    subdirs.append(rel)
+                elif stat.S_ISREG(st.st_mode):
+                    mode = "100755" if st.st_mode & 0o111 else "100644"
+                    entries.append({"path": rel, "type": "blob", "mode": mode, "size": st.st_size})
+                if len(entries) >= LOCAL_MAX_ENTRIES:
+                    truncated = True
+                    break
+            os.close(fd)
+            stack.extend(reversed(subdirs))
+        super().__init__(net, None, None, None, sha, {"tree": entries, "truncated": truncated})
+        self.name = name or os.path.basename(self.root)
+        self._kinds = {e["path"]: e["mode"] for e in entries}
+
+    def _open_dir(self, rel_dir):
+        """A descriptor for rel_dir, opened one component at a time from the root."""
+        fd = os.dup(self._root_fd)
+        for part in rel_dir.split("/") if rel_dir else []:
+            try:
+                nxt = os.open(part, self.DIR_FLAGS, dir_fd=fd)
+            finally:
+                os.close(fd)
+            fd = nxt
+        return fd
+
+    def _read(self, path, max_bytes):
+        mode = self._kinds.get(path)
+        if mode is None:
+            return {"skipped": "not found"}
+        parent, _, leaf = path.rpartition("/")
+        try:
+            dfd = self._open_dir(parent)
+            try:
+                if mode == "120000":
+                    target = os.readlink(leaf, dir_fd=dfd)
+                    if len(target.encode("utf-8", "surrogateescape")) > max_bytes:
+                        return {"skipped": "over size limit"}
+                    return {"text": target}
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+            finally:
+                os.close(dfd)
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    return {"skipped": "not a regular file"}
+                body = fh.read(max_bytes + 1)
+        except OSError:
+            return {"skipped": "unreadable"}
+        if len(body) > max_bytes:
+            return {"skipped": "over size limit"}
+        if b"\x00" in body[:8000]:
+            return {"skipped": "binary"}
+        return {"text": body.decode("utf-8", "replace")}
+
+    def fetch_text(self, path, max_bytes=RAW_MAX_BYTES):
+        key = (path, max_bytes)
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        res = self._read(path, max_bytes)
+        with self._lock:
+            self._cache[key] = res
+        return res
+
 def _bound_result(result):
     findings = sorted(result.get("findings", []), key=lambda f: SEVERITIES.index(f["severity"]))
     if len(findings) > REPORT_MAX_FINDINGS:
@@ -1651,7 +1777,17 @@ def scan(target, token=None):
         raise ScanError("The file list could not be read.")
     owner, repo = meta["owner"]["login"], meta["name"]
     ctx = Context(net, owner, repo, meta, sha, tree)
+    checks = _run_checks(ctx)
+    return {
+        "tool": "luddite-scout", "version": VERSION,
+        "repository": f"{owner}/{repo}", "commit": sha,
+        "api": {"calls": net.calls, "remaining": net.remaining, "limit": net.limit,
+                "authenticated": net.token is not None, "tokenRejected": net.token_rejected},
+        "checks": checks,
+    }
 
+
+def _run_checks(ctx):
     results = {}
     for cid in RUN_ORDER:
         cid_, name, fn = next(c for c in CHECKS if c[0] == cid)
@@ -1661,13 +1797,22 @@ def scan(target, token=None):
             results[cid] = {"status": "skipped", "notes": [str(e)], "findings": []}
         except Exception as e:  # one check failing must not hide the others
             results[cid] = {"status": "skipped", "notes": [f"This check failed: {truncate(e, 200)}"], "findings": []}
+    return [{"id": cid, "name": name, **results[cid]} for cid, name, _ in CHECKS]
 
+
+def scan_dir(path, name=None, commit=None):
+    """--dir: the same checks over a local checkout. S1 does not apply, S5
+    asks OSV only when there are lockfiles, and no GitHub API call is made."""
+    if commit is not None and not SHA40.match(commit):
+        raise ValueError("The commit must be a full 40-character SHA.")
+    net = Net(None)
+    ctx = LocalContext(path, net, name, commit)
     return {
         "tool": "luddite-scout", "version": VERSION,
-        "repository": f"{owner}/{repo}", "commit": sha,
+        "repository": ctx.name, "commit": commit,
         "api": {"calls": net.calls, "remaining": net.remaining, "limit": net.limit,
-                "authenticated": net.token is not None, "tokenRejected": net.token_rejected},
-        "checks": [{"id": cid, "name": name, **results[cid]} for cid, name, _ in CHECKS],
+                "authenticated": False, "tokenRejected": False, "local": True},
+        "checks": _run_checks(ctx),
     }
 
 
@@ -1691,7 +1836,7 @@ def json_safe(out):
 
 
 def format_text(report):
-    out = [f"{report['repository']} at {report['commit']}"]
+    out = [f"{report['repository']} at {report['commit'] or 'a local checkout'}"]
     for c in report["checks"]:
         counts = {}
         for f in c["findings"]:
@@ -1708,8 +1853,11 @@ def format_text(report):
             out.append(f"  {f['severity'].upper():6} {f['title']}{loc}")
     api = report["api"]
     out.append("")
-    who = "signed in" if api.get("authenticated") else "anonymous"
-    out.append(f"GitHub API ({who}): {api['calls']} requests used, {api['remaining']} of {api['limit']} left this hour.")
+    if api.get("local"):
+        out.append("Local scan: no GitHub API calls.")
+    else:
+        who = "signed in" if api.get("authenticated") else "anonymous"
+        out.append(f"GitHub API ({who}): {api['calls']} requests used, {api['remaining']} of {api['limit']} left this hour.")
     if api.get("tokenRejected"):
         out.append("GitHub rejected the token, so the scan continued without it.")
     return "\n".join(term_safe(line) for line in out)
@@ -1995,10 +2143,26 @@ def gh_token():
     return token if TOKEN.fullmatch(token) else None
 
 
+VALUED = ("--name", "--commit")
+
+
 def main(argv):
+    argv, values = list(argv), {}
+    for opt in VALUED:
+        while opt in argv:
+            i = argv.index(opt)
+            if i + 1 >= len(argv):
+                print(__doc__.strip(), file=sys.stderr)
+                return 2
+            values[opt] = argv[i + 1]
+            del argv[i:i + 2]
     args = [a for a in argv if not a.startswith("--")]
     flags = {a for a in argv if a.startswith("--")}
-    unknown = flags - {"--json", "--agent", "--token-stdin", "--gh-token", "--help", "--version"}
+    unknown = flags - {"--json", "--agent", "--token-stdin", "--gh-token", "--help", "--version", "--dir"}
+    if "--dir" not in flags and values:
+        unknown = unknown | set(values)
+    if "--dir" in flags and flags & {"--agent", "--token-stdin", "--gh-token"}:
+        unknown = unknown | {"--dir"}
     if "--help" in flags or unknown or len(args) != 1:
         if "--version" in flags and not args:
             print(VERSION)
@@ -2016,7 +2180,10 @@ def main(argv):
     if "--agent" in flags:
         return agent_main(args[0], token)
     try:
-        report = scan(args[0], token)
+        if "--dir" in flags:
+            report = scan_dir(args[0], values.get("--name"), values.get("--commit"))
+        else:
+            report = scan(args[0], token)
     except ValueError as e:
         msg, code = str(e), 2
     except ScanError as e:
