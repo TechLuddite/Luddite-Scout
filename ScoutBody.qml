@@ -26,6 +26,12 @@ ColumnLayout {
   spacing: Style.spacing.lg
 
   readonly property var order: ["high", "medium", "low", "info"]
+  readonly property bool showList: view.scout.mode === "installed"
+  readonly property bool showReport: view.scout.mode === "scan" && view.scout.report !== null
+  readonly property var cmp: view.scout.report && view.scout.report.compare ? view.scout.report.compare : null
+  readonly property int shownPaths: 8
+
+  function short(sha) { return sha ? String(sha).slice(0, 12) : "unknown" }
 
   function severityColor(sev) {
     return sev === "high" ? view.urgent : sev === "medium" ? view.accent : view.foreground
@@ -118,6 +124,15 @@ ColumnLayout {
     Item { Layout.fillWidth: true }
 
     PanelActionButton {
+      // nf-md-puzzle, U+F0431, and nf-md-magnify, U+F0349
+      iconText: String.fromCodePoint(view.scout.mode === "installed" ? 0xF0349 : 0xF0431)
+      tooltipText: view.scout.mode === "installed" ? "Back to scanning a repository" : "Installed plugins"
+      foreground: view.foreground
+      fontFamily: view.fontFamily
+      onClicked: view.scout.mode === "installed" ? view.scout.mode = "scan" : view.scout.showInstalled()
+    }
+
+    PanelActionButton {
       visible: !view.inWindow
       // nf-md-open_in_new, U+F03CC
       iconText: String.fromCodePoint(0xF03CC)
@@ -138,6 +153,7 @@ ColumnLayout {
 
   RowLayout {
     Layout.fillWidth: true
+    visible: view.scout.mode === "scan"
     spacing: Style.spacing.controlGap
 
     TextField {
@@ -172,18 +188,141 @@ ColumnLayout {
   Plain {
     Layout.fillWidth: true
     visible: view.scout.running || view.scout.errorText !== ""
-    text: view.scout.running ? "Scanning. A large repository takes up to a minute." : view.scout.errorText
+    text: view.scout.running
+      ? (view.scout.mode === "installed" ? "Reading the plugins folder." : "Scanning. A large repository takes up to a minute.")
+      : view.scout.errorText
     color: view.scout.errorText !== "" && !view.scout.running ? view.urgent : view.foreground
     opacity: view.scout.running ? 0.7 : 1.0
     font.family: view.fontFamily
   }
 
-  PanelSeparator { Layout.fillWidth: true; foreground: view.foreground; visible: view.scout.report !== null }
+  PanelSeparator { Layout.fillWidth: true; foreground: view.foreground; visible: view.showReport || view.showList }
+
+  // The installed Omarchy shell plugins, with the repository each came from.
+  Flickable {
+    Layout.fillWidth: true
+    Layout.fillHeight: true
+    visible: view.showList
+    implicitHeight: plugins.implicitHeight
+    Layout.minimumHeight: view.showList ? Style.space(160) : 0
+    contentWidth: width
+    contentHeight: plugins.implicitHeight
+    clip: true
+    boundsBehavior: Flickable.StopAtBounds
+
+    ColumnLayout {
+      id: plugins
+      width: parent.width
+      spacing: Style.spacing.md
+
+      PanelSectionHeader {
+        text: "INSTALLED PLUGINS"
+        foreground: view.foreground
+        fontFamily: view.fontFamily
+      }
+
+      Plain {
+        Layout.fillWidth: true
+        visible: view.scout.installed.length === 0 && !view.scout.running
+        text: "No plugins found in the Omarchy plugins folder."
+        color: view.foreground
+        opacity: 0.7
+        font.family: view.fontFamily
+      }
+
+      Repeater {
+        model: view.scout.installed
+
+        delegate: Rectangle {
+          id: plugin
+          required property var modelData
+          readonly property string pluginId: String(modelData.id).slice(0, 100)
+          readonly property string source: modelData.source ? String(modelData.source).slice(0, 140) : ""
+
+          Layout.fillWidth: true
+          implicitHeight: row.implicitHeight + Style.spacing.lg * 2
+          radius: Style.cornerRadius
+          color: Util.alpha(view.foreground, Style.normalFillAlpha)
+
+          RowLayout {
+            id: row
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.spacing.xxl
+            anchors.rightMargin: Style.spacing.xxl
+            spacing: Style.spacing.md
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: Style.spacing.xxs
+              Plain {
+                Layout.fillWidth: true
+                text: (plugin.modelData.name ? String(plugin.modelData.name).slice(0, 100) : plugin.pluginId)
+                  + (plugin.modelData.version ? "  " + String(plugin.modelData.version).slice(0, 40) : "")
+                color: view.foreground
+                font.family: view.fontFamily
+                font.bold: true
+              }
+              Plain {
+                Layout.fillWidth: true
+                text: plugin.pluginId
+                color: view.foreground
+                opacity: 0.6
+                font.family: view.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Plain {
+                Layout.fillWidth: true
+                text: (plugin.source !== "" ? "Source: " + plugin.source : "No GitHub origin recorded")
+                  + (plugin.modelData.commit ? " at " + String(plugin.modelData.commit).slice(0, 12) : "")
+                  + (plugin.modelData.linked === true ? "  ·  linked from outside the plugins folder" : "")
+                color: view.foreground
+                opacity: plugin.source !== "" ? 0.85 : 0.6
+                font.family: view.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            Button {
+              text: "Installed"
+              tooltipText: "Scan the copy on this machine"
+              bordered: true
+              foreground: view.foreground
+              accent: view.accent
+              fontFamily: view.fontFamily
+              onClicked: view.scout.scanInstalled(plugin.pluginId)
+            }
+            Button {
+              text: "Source"
+              tooltipText: "Scan the repository it came from"
+              visible: plugin.source !== ""
+              bordered: true
+              foreground: view.foreground
+              accent: view.accent
+              fontFamily: view.fontFamily
+              onClicked: { view.scout.target = plugin.source; view.scout.startScan(plugin.source) }
+            }
+            Button {
+              text: "Compare"
+              tooltipText: "Scan both and show what differs"
+              visible: plugin.source !== ""
+              bordered: true
+              foreground: view.foreground
+              accent: view.accent
+              fontFamily: view.fontFamily
+              onClicked: view.scout.compareInstalled(plugin.pluginId)
+            }
+          }
+        }
+      }
+    }
+  }
 
   Flickable {
     Layout.fillWidth: true
     Layout.fillHeight: true
-    visible: view.scout.report !== null
+    visible: view.showReport
     implicitHeight: body.implicitHeight
     Layout.minimumHeight: view.scout.report ? Style.space(160) : 0
     contentWidth: width
@@ -212,7 +351,9 @@ ColumnLayout {
         Plain {
           Layout.fillWidth: true
           visible: text !== ""
-          text: view.scout.report && view.scout.report.commit ? "Commit " + String(view.scout.report.commit).slice(0, 12) : ""
+          text: !view.scout.report ? ""
+            : (view.scout.report.plugin && !view.cmp ? "Installed copy of " + String(view.scout.report.plugin.id).slice(0, 100) + ". " : "")
+              + (view.scout.report.commit ? "Commit " + String(view.scout.report.commit).slice(0, 12) : "")
           color: view.foreground
           opacity: 0.6
           font.family: view.fontFamily
@@ -235,6 +376,121 @@ ColumnLayout {
             color: view.foreground
             opacity: 0.7
             font.family: view.fontFamily
+          }
+        }
+      }
+
+      // The installed copy against its source, for a Compare run.
+      Rectangle {
+        Layout.fillWidth: true
+        visible: view.cmp !== null
+        implicitHeight: cmpCol.implicitHeight + Style.spacing.lg * 2
+        radius: Style.cornerRadius
+        color: Util.alpha(view.accent, 0.06)
+        border.width: 1
+        border.color: Util.alpha(view.accent, 0.3)
+
+        ColumnLayout {
+          id: cmpCol
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.margins: Style.spacing.xxl
+          anchors.topMargin: Style.spacing.lg
+          spacing: Style.spacing.sm
+
+          PanelSectionHeader {
+            text: "INSTALLED COPY AGAINST ITS SOURCE"
+            foreground: view.foreground
+            fontFamily: view.fontFamily
+          }
+          Plain {
+            Layout.fillWidth: true
+            text: view.cmp ? "Installed commit " + view.short(view.cmp.installedCommit) + ", source commit " + view.short(view.cmp.sourceCommit)
+              + (view.cmp.sameCommit === true ? ". They are the same." : ". The installed copy is not at the source's latest commit.") : ""
+            color: view.foreground
+            font.family: view.fontFamily
+          }
+          Plain {
+            Layout.fillWidth: true
+            readonly property var f: view.cmp ? view.cmp.files : null
+            readonly property bool clean: f ? Number(f.changedCount) + Number(f.addedCount) + Number(f.missingCount) === 0 : false
+            text: !view.cmp ? "" : !f
+              ? "Files were not compared, because the installed commit is unknown or is not in the source repository."
+              : clean ? "All " + Number(f.checked) + " installed files match the source at the installed commit."
+              : "Against the source at the installed commit: " + Number(f.changedCount) + " changed, " + Number(f.addedCount) + " added, " + Number(f.missingCount) + " missing, of " + Number(f.checked) + " checked."
+            color: f && !clean ? view.urgent : view.foreground
+            font.family: view.fontFamily
+            font.bold: f ? !clean : false
+          }
+          Repeater {
+            model: {
+              var out = []
+              var f = view.cmp ? view.cmp.files : null
+              if (!f) return out
+              var kinds = [["changed", "Changed"], ["added", "Added"], ["missing", "Missing"]]
+              for (var k = 0; k < kinds.length; k++) {
+                var rows = view.scout.list(f[kinds[k][0]], view.shownPaths)
+                for (var i = 0; i < rows.length; i++) out.push(kinds[k][1] + "  " + String(rows[i]).slice(0, 300))
+              }
+              return out
+            }
+            delegate: Plain {
+              required property var modelData
+              Layout.fillWidth: true
+              text: modelData
+              color: view.foreground
+              opacity: 0.8
+              font.family: view.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+          Repeater {
+            model: [["onlyInstalled", "Findings only in the installed copy"], ["onlySource", "Findings only in the source"]]
+            delegate: ColumnLayout {
+              id: side
+              required property var modelData
+              readonly property var rows: view.cmp ? view.scout.list(view.cmp[modelData[0]], view.shownPaths) : []
+              readonly property int total: view.cmp ? Number(view.cmp[modelData[0] + "Count"]) || 0 : 0
+              Layout.fillWidth: true
+              spacing: Style.spacing.xxs
+              Plain {
+                Layout.fillWidth: true
+                text: side.modelData[1] + ": " + side.total
+                color: view.foreground
+                font.family: view.fontFamily
+                font.bold: side.total > 0
+              }
+              Repeater {
+                model: side.rows
+                delegate: Plain {
+                  required property var modelData
+                  Layout.fillWidth: true
+                  text: String(modelData.severity).toUpperCase().slice(0, 6) + "  " + String(modelData.title).slice(0, 200)
+                    + (modelData.path ? "  ·  " + String(modelData.path).slice(0, 200) : "")
+                  color: view.severityColor(modelData.severity)
+                  font.family: view.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+              Plain {
+                Layout.fillWidth: true
+                visible: side.total > side.rows.length
+                text: (side.total - side.rows.length) + " more. bin/scout --plugin ID --compare lists them."
+                color: view.foreground
+                opacity: 0.6
+                font.family: view.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+          Plain {
+            Layout.fillWidth: true
+            text: "The cards below are the report for the source."
+            color: view.foreground
+            opacity: 0.6
+            font.family: view.fontFamily
+            font.pixelSize: Style.font.bodySmall
           }
         }
       }
@@ -398,7 +654,7 @@ ColumnLayout {
   }
 
   // In a window taller than its content, keep the rows together at the top.
-  Item { Layout.fillHeight: true; visible: view.scout.report === null }
+  Item { Layout.fillHeight: true; visible: !view.showReport && !view.showList }
 
   PanelSeparator { Layout.fillWidth: true; foreground: view.foreground }
 
