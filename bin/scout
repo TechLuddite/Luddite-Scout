@@ -2395,6 +2395,47 @@ def compare_files(ctx, tree):
             "truncated": bool(tree.get("truncated")) or ctx.truncated}
 
 
+COMPARE_MAX_DIFFS = 8
+COMPARE_MAX_DIFF_LINES = 40
+COMPARE_MAX_DIFF_BYTES = 400_000
+
+
+def file_diffs(ctx, net, owner, repo, commit, paths):
+    """Line differences for changed text files: the source at the installed
+    commit against the installed file. Binary and oversized files are named
+    without lines."""
+    import difflib
+    out = []
+    for path in paths[:COMPARE_MAX_DIFFS]:
+        entry = {"path": truncate(path, 300), "lines": [], "more": 0, "note": ""}
+        local = ctx.read_blob(path, COMPARE_MAX_DIFF_BYTES)
+        res = net.raw(owner, repo, commit, path, COMPARE_MAX_DIFF_BYTES)
+        if local is None or b"\x00" in local[:8000] or "text" not in res:
+            entry["note"] = "binary, too large or unreadable, so no lines are shown"
+        else:
+            a = res["text"].splitlines()
+            b = local.decode("utf-8", "replace").splitlines()
+            lines = [l for l in difflib.unified_diff(a, b, lineterm="", n=1) if not l.startswith(("---", "+++"))]
+            if not lines:
+                entry["note"] = "differs only in line endings or the final newline"
+            entry["lines"] = [truncate(l, 200) for l in lines[:COMPARE_MAX_DIFF_LINES]]
+            entry["more"] = max(0, len(lines) - COMPARE_MAX_DIFF_LINES)
+        out.append(entry)
+    return out
+
+
+def commits_behind(net, owner, repo, installed, latest):
+    """How many commits the source has that the installed copy lacks, or None."""
+    if not installed or installed == latest:
+        return 0 if installed else None
+    try:
+        cmp = net.api(f"/repos/{owner}/{repo}/compare/{installed}...{latest}")
+    except ScanError:
+        return None
+    n = cmp.get("ahead_by") if isinstance(cmp, dict) else None
+    return n if isinstance(n, int) else None
+
+
 def _finding_keys(report):
     out = {}
     for c in report["checks"]:
@@ -2420,19 +2461,28 @@ def compare_plugin(pid, token=None):
         raise ScanError("This plugin has no GitHub origin recorded, so there is nothing to compare it with.")
     installed = scan_dir(info["root"], info["source"], info["commit"])
     source = scan(info["source"], token)
-    files = None
+    files, behind = None, None
+    owner, repo = info["source"].split("/")
     if info["commit"]:
         net = Net(token)
-        owner, repo = info["source"].split("/")
         tree = net.api(f"/repos/{owner}/{repo}/git/trees/{info['commit']}?recursive=1")
         if tree:
-            files = compare_files(LocalContext(info["root"], Net(None), info["source"], info["commit"]), tree)
+            ctx = LocalContext(info["root"], Net(None), info["source"], info["commit"])
+            files = compare_files(ctx, tree)
+            files["diffs"] = file_diffs(ctx, net, owner, repo, info["commit"], files["changed"])
+            behind = commits_behind(net, owner, repo, info["commit"], source["commit"])
+    if files is None:
+        verdict = "unknown"
+    elif files["changedCount"] or files["addedCount"] or files["missingCount"]:
+        verdict = "modified"
+    else:
+        verdict = "identical"
     return {
         "tool": "luddite-scout", "version": VERSION,
         "plugin": {k: v for k, v in info.items() if k != "root"},
         "repository": source["repository"], "commit": source["commit"], "api": source["api"],
-        "compare": {"installedCommit": info["commit"], "sourceCommit": source["commit"],
-                    "sameCommit": bool(info["commit"]) and info["commit"] == source["commit"],
+        "compare": {"verdict": verdict, "installedCommit": info["commit"], "sourceCommit": source["commit"],
+                    "sameCommit": bool(info["commit"]) and info["commit"] == source["commit"], "behind": behind,
                     "commitInSource": files is not None, "files": files, **diff_findings(installed, source)},
         "checks": source["checks"], "installedChecks": installed["checks"],
     }
@@ -2452,19 +2502,37 @@ def format_installed(listing):
 
 def format_compare(result):
     c = result["compare"]
-    lines = [f"{result['plugin']['id']}  from  {result['repository']}",
-             f"Installed commit: {c['installedCommit'] or 'unknown'}",
-             f"Source commit:    {c['sourceCommit']}" + ("  (same)" if c["sameCommit"] else "")]
     f = c["files"]
-    if f is None:
-        lines.append("Files: not compared. The installed commit is unknown or is not in the source repository.")
+    name = f"{result['plugin']['id']} from {result['repository']}"
+    if c["verdict"] == "modified":
+        lines = [f"DIFFERS: the installed copy of {name} does not match its source at the installed commit."]
+    elif c["verdict"] == "identical":
+        lines = [f"MATCHES: every installed file of {name} matches its source at the installed commit."]
     else:
-        lines.append(f"Files against the source at the installed commit: {f['checked']} checked, {f['changedCount']} changed, {f['addedCount']} added, {f['missingCount']} missing.")
-        for label, key in (("changed", "changed"), ("added", "added"), ("missing", "missing")):
-            lines += [f"  {label}: {p}" for p in f[key]]
-    for label, key in (("Findings only in the installed copy", "onlyInstalled"), ("Findings only in the source", "onlySource")):
-        lines.append(f"{label}: {c[key + 'Count']}")
-        lines += [f"  [{x['severity']}] {x['title']}" + (f"  {x['path']}" if x.get("path") else "") for x in c[key]]
+        lines = [f"NOT COMPARED: the installed commit of {name} is unknown or is not in the source repository."]
+    lines.append(f"Installed commit {c['installedCommit'] or 'unknown'}, latest source commit {c['sourceCommit']}.")
+    if c["sameCommit"]:
+        lines.append("The installed copy is at the latest commit.")
+    elif c["behind"] is not None:
+        lines.append(f"The source is {c['behind']} commit{'' if c['behind'] == 1 else 's'} newer.")
+    if f:
+        lines.append(f"{f['checked']} files checked: {f['changedCount']} changed, {f['addedCount']} added, {f['missingCount']} missing.")
+        for d in f.get("diffs", []):
+            lines.append(f"  changed: {d['path']}" + (f"  ({d['note']})" if d["note"] else ""))
+            lines += ["      " + l for l in d["lines"]]
+            if d["more"]:
+                lines.append(f"      {d['more']} more lines")
+        shown = {d["path"] for d in f.get("diffs", [])}
+        lines += [f"  changed: {p}" for p in f["changed"] if p not in shown]
+        lines += [f"  added: {p}" for p in f["added"]]
+        lines += [f"  missing: {p}" for p in f["missing"]]
+    labels = (("Findings only in the installed copy", "onlyInstalled"), ("Findings only in the latest source", "onlySource"))
+    for label, key in labels:
+        if c[key + "Count"]:
+            lines.append(f"{label}: {c[key + 'Count']}")
+            lines += [f"  [{x['severity']}] {x['title']}" + (f"  {x['path']}" if x.get("path") else "") for x in c[key]]
+    if not c["onlyInstalledCount"] and not c["onlySourceCount"]:
+        lines.append("Both scans report the same findings.")
     return "\n".join(term_safe(l) for l in lines)
 
 

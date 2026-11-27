@@ -29,7 +29,9 @@ ColumnLayout {
   readonly property bool showList: view.scout.mode === "installed"
   readonly property bool showReport: view.scout.mode === "scan" && view.scout.report !== null
   readonly property var cmp: view.scout.report && view.scout.report.compare ? view.scout.report.compare : null
-  readonly property int shownPaths: 8
+  // In a Compare run the source report is hidden until asked for.
+  property bool showSourceReport: false
+  onCmpChanged: showSourceReport = false
 
   function short(sha) { return sha ? String(sha).slice(0, 12) : "unknown" }
 
@@ -437,7 +439,9 @@ ColumnLayout {
 
         Plain {
           Layout.fillWidth: true
-          text: view.scout.report ? String(view.scout.report.repository).slice(0, 200) : ""
+          text: !view.scout.report ? ""
+            : view.cmp && view.scout.report.plugin ? String(view.scout.report.plugin.id).slice(0, 100) + " against " + String(view.scout.report.repository).slice(0, 140)
+            : String(view.scout.report.repository).slice(0, 200)
           color: view.foreground
           font.family: view.fontFamily
           font.pixelSize: Style.font.title
@@ -448,7 +452,7 @@ ColumnLayout {
           visible: text !== ""
           text: !view.scout.report ? ""
             : (view.scout.report.plugin && !view.cmp ? "Installed copy of " + String(view.scout.report.plugin.id).slice(0, 100) + ". " : "")
-              + (view.scout.report.commit ? "Commit " + String(view.scout.report.commit).slice(0, 12) : "")
+              + (view.cmp ? "" : view.scout.report.commit ? "Commit " + String(view.scout.report.commit).slice(0, 12) : "")
           color: view.foreground
           opacity: 0.6
           font.family: view.fontFamily
@@ -458,7 +462,7 @@ ColumnLayout {
           Layout.fillWidth: true
           spacing: Style.spacing.sm
           Repeater {
-            model: view.countList(view.totals(view.scout.report))
+            model: view.cmp === null || view.showSourceReport ? view.countList(view.totals(view.scout.report)) : []
             delegate: Chip {
               required property var modelData
               severity: modelData.severity
@@ -466,7 +470,7 @@ ColumnLayout {
             }
           }
           Plain {
-            visible: view.scout.report !== null && view.worst(view.totals(view.scout.report)) === ""
+            visible: view.scout.report !== null && view.cmp === null && view.worst(view.totals(view.scout.report)) === ""
             text: "No findings."
             color: view.foreground
             opacity: 0.7
@@ -475,103 +479,124 @@ ColumnLayout {
         }
       }
 
-      // The installed copy against its source, for a Compare run.
-      Rectangle {
+      // A Compare run shows only what differs. The source report stays one
+      // button away.
+      ColumnLayout {
         Layout.fillWidth: true
         visible: view.cmp !== null
-        implicitHeight: cmpCol.implicitHeight + Style.spacing.lg * 2
-        radius: Style.cornerRadius
-        color: Util.alpha(view.accent, 0.06)
-        border.width: 1
-        border.color: Util.alpha(view.accent, 0.3)
+        spacing: Style.spacing.lg
 
-        ColumnLayout {
-          id: cmpCol
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: parent.top
-          anchors.margins: Style.spacing.xxl
-          anchors.topMargin: Style.spacing.lg
-          spacing: Style.spacing.sm
+        readonly property var files: view.cmp ? view.cmp.files : null
+        readonly property string verdict: view.cmp ? String(view.cmp.verdict) : ""
 
-          PanelSectionHeader {
-            text: "INSTALLED COPY AGAINST ITS SOURCE"
-            foreground: view.foreground
-            fontFamily: view.fontFamily
-          }
-          Plain {
-            Layout.fillWidth: true
-            text: view.cmp ? "Installed commit " + view.short(view.cmp.installedCommit) + ", source commit " + view.short(view.cmp.sourceCommit)
-              + (view.cmp.sameCommit === true ? ". They are the same." : ". The installed copy is not at the source's latest commit.") : ""
-            color: view.foreground
-            font.family: view.fontFamily
-          }
-          Plain {
-            Layout.fillWidth: true
-            readonly property var f: view.cmp ? view.cmp.files : null
-            readonly property bool clean: f ? Number(f.changedCount) + Number(f.addedCount) + Number(f.missingCount) === 0 : false
-            text: !view.cmp ? "" : !f
-              ? "Files were not compared, because the installed commit is unknown or is not in the source repository."
-              : clean ? "All " + Number(f.checked) + " installed files match the source at the installed commit."
-              : "Against the source at the installed commit: " + Number(f.changedCount) + " changed, " + Number(f.addedCount) + " added, " + Number(f.missingCount) + " missing, of " + Number(f.checked) + " checked."
-            color: f && !clean ? view.urgent : view.foreground
-            font.family: view.fontFamily
-            font.bold: f ? !clean : false
-          }
-          Repeater {
-            model: {
-              var out = []
-              var f = view.cmp ? view.cmp.files : null
-              if (!f) return out
-              var kinds = [["changed", "Changed"], ["added", "Added"], ["missing", "Missing"]]
-              for (var k = 0; k < kinds.length; k++) {
-                var rows = view.scout.list(f[kinds[k][0]], view.shownPaths)
-                for (var i = 0; i < rows.length; i++) out.push(kinds[k][1] + "  " + String(rows[i]).slice(0, 300))
-              }
-              return out
-            }
-            delegate: Plain {
-              required property var modelData
+        Rectangle {
+          Layout.fillWidth: true
+          implicitHeight: verdictCol.implicitHeight + Style.spacing.xxl * 2
+          radius: Style.cornerRadius
+          readonly property color tint: parent.verdict === "modified" ? view.urgent : parent.verdict === "identical" ? view.accent : view.foreground
+          color: Util.alpha(tint, 0.08)
+          border.width: 1
+          border.color: Util.alpha(tint, 0.45)
+
+          ColumnLayout {
+            id: verdictCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.spacing.xxl
+            spacing: Style.spacing.sm
+
+            Plain {
               Layout.fillWidth: true
-              text: modelData
+              text: !view.cmp ? ""
+                : view.cmp.verdict === "modified" ? "The installed copy differs from its source"
+                : view.cmp.verdict === "identical" ? "The installed copy matches its source"
+                : "The files could not be compared"
+              color: view.cmp && view.cmp.verdict === "modified" ? view.urgent : view.foreground
+              font.family: view.fontFamily
+              font.pixelSize: Style.font.heading
+              font.bold: true
+            }
+            Plain {
+              Layout.fillWidth: true
+              readonly property var f: view.cmp ? view.cmp.files : null
+              text: !view.cmp ? ""
+                : !f ? "The installed commit is unknown or is not in the source repository."
+                : view.cmp.verdict === "modified"
+                  ? Number(f.changedCount) + " changed, " + Number(f.addedCount) + " added, " + Number(f.missingCount) + " missing, of " + Number(f.checked) + " files checked against commit " + view.short(view.cmp.installedCommit) + "."
+                  : "All " + Number(f.checked) + " files are byte for byte what the source has at commit " + view.short(view.cmp.installedCommit) + "."
               color: view.foreground
-              opacity: 0.8
+              font.family: view.fontFamily
+            }
+            Plain {
+              Layout.fillWidth: true
+              text: !view.cmp ? ""
+                : view.cmp.sameCommit === true ? "That is the latest commit."
+                : view.cmp.behind !== null && view.cmp.behind !== undefined
+                  ? "The source is " + Number(view.cmp.behind) + (Number(view.cmp.behind) === 1 ? " commit" : " commits") + " newer, at " + view.short(view.cmp.sourceCommit) + "."
+                  : "The latest source commit is " + view.short(view.cmp.sourceCommit) + "."
+              color: view.foreground
+              opacity: 0.7
               font.family: view.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
           }
-          Repeater {
-            model: [["onlyInstalled", "Findings only in the installed copy"], ["onlySource", "Findings only in the source"]]
-            delegate: ColumnLayout {
-              id: side
-              required property var modelData
-              readonly property var rows: view.cmp ? view.scout.list(view.cmp[modelData[0]], view.shownPaths) : []
-              readonly property int total: view.cmp ? Number(view.cmp[modelData[0] + "Count"]) || 0 : 0
-              Layout.fillWidth: true
+        }
+
+        // Changed files, each with the lines that differ.
+        Repeater {
+          model: view.cmp && view.cmp.files ? view.scout.list(view.cmp.files.diffs, 8) : []
+          delegate: Rectangle {
+            id: diff
+            required property var modelData
+            Layout.fillWidth: true
+            implicitHeight: diffCol.implicitHeight + Style.spacing.lg * 2
+            radius: Style.cornerRadius
+            color: Util.alpha(view.foreground, Style.normalFillAlpha)
+
+            ColumnLayout {
+              id: diffCol
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.spacing.xxl
+              anchors.topMargin: Style.spacing.lg
               spacing: Style.spacing.xxs
+
               Plain {
                 Layout.fillWidth: true
-                text: side.modelData[1] + ": " + side.total
+                text: "Changed  " + String(diff.modelData.path).slice(0, 300)
                 color: view.foreground
                 font.family: view.fontFamily
-                font.bold: side.total > 0
+                font.bold: true
+              }
+              Plain {
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: diff.modelData.note ? String(diff.modelData.note).slice(0, 200) : ""
+                color: view.foreground
+                opacity: 0.6
+                font.family: view.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
               Repeater {
-                model: side.rows
+                model: view.scout.list(diff.modelData.lines, 40)
                 delegate: Plain {
                   required property var modelData
+                  readonly property string kind: String(modelData).charAt(0)
                   Layout.fillWidth: true
-                  text: String(modelData.severity).toUpperCase().slice(0, 6) + "  " + String(modelData.title).slice(0, 200)
-                    + (modelData.path ? "  ·  " + String(modelData.path).slice(0, 200) : "")
-                  color: view.severityColor(modelData.severity)
+                  wrapMode: Text.WrapAnywhere
+                  text: String(modelData).slice(0, 200)
+                  color: kind === "+" ? view.accent : kind === "-" ? view.urgent : view.foreground
+                  opacity: kind === "+" || kind === "-" ? 1.0 : 0.55
                   font.family: view.fontFamily
                   font.pixelSize: Style.font.bodySmall
                 }
               }
               Plain {
                 Layout.fillWidth: true
-                visible: side.total > side.rows.length
-                text: (side.total - side.rows.length) + " more. bin/scout --plugin ID --compare lists them."
+                visible: Number(diff.modelData.more) > 0
+                text: Number(diff.modelData.more) + " more lines. bin/scout --plugin ID --compare stops at the same point, so compare the file by hand."
                 color: view.foreground
                 opacity: 0.6
                 font.family: view.fontFamily
@@ -579,19 +604,100 @@ ColumnLayout {
               }
             }
           }
-          Plain {
-            Layout.fillWidth: true
-            text: "The cards below are the report for the source."
-            color: view.foreground
-            opacity: 0.6
-            font.family: view.fontFamily
-            font.pixelSize: Style.font.bodySmall
+        }
+
+        // Files added to or missing from the installed copy, and changed
+        // files past the first eight.
+        Repeater {
+          model: {
+            var out = []
+            var f = view.cmp ? view.cmp.files : null
+            if (!f) return out
+            var shown = {}
+            var diffs = view.scout.list(f.diffs, 8)
+            for (var d = 0; d < diffs.length; d++) shown[String(diffs[d].path)] = true
+            var kinds = [["changed", "Changed"], ["added", "Added, not in the source"], ["missing", "Missing from the installed copy"]]
+            for (var k = 0; k < kinds.length; k++) {
+              var rows = view.scout.list(f[kinds[k][0]], 50)
+              for (var i = 0; i < rows.length; i++) if (!shown[String(rows[i])]) out.push([kinds[k][1], String(rows[i]).slice(0, 300)])
+            }
+            return out
           }
+          delegate: RowLayout {
+            required property var modelData
+            Layout.fillWidth: true
+            spacing: Style.spacing.md
+            Plain {
+              text: modelData[0]
+              color: view.urgent
+              font.family: view.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+            Plain {
+              Layout.fillWidth: true
+              text: modelData[1]
+              color: view.foreground
+              font.family: view.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+        }
+
+        // Findings that only one of the two scans reports.
+        Repeater {
+          model: view.cmp ? [["onlyInstalled", "Findings only in the installed copy"],
+                             ["onlySource", view.cmp.sameCommit === true ? "Findings only in the source" : "Findings only in the newer source"]] : []
+          delegate: ColumnLayout {
+            id: side
+            required property var modelData
+            readonly property var rows: view.cmp ? view.scout.list(view.cmp[modelData[0]], 100) : []
+            readonly property int total: view.cmp ? Number(view.cmp[modelData[0] + "Count"]) || 0 : 0
+            Layout.fillWidth: true
+            visible: side.total > 0
+            spacing: Style.spacing.xxs
+            PanelSectionHeader {
+              text: (side.modelData[1] + ": " + side.total).toUpperCase()
+              foreground: view.foreground
+              fontFamily: view.fontFamily
+            }
+            Repeater {
+              model: side.rows
+              delegate: Plain {
+                required property var modelData
+                Layout.fillWidth: true
+                text: String(modelData.severity).toUpperCase().slice(0, 6) + "  " + String(modelData.title).slice(0, 200)
+                  + (modelData.path ? "  ·  " + String(modelData.path).slice(0, 200) : "")
+                color: view.severityColor(modelData.severity)
+                opacity: modelData.severity === "info" ? 0.6 : 1.0
+                font.family: view.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+        }
+
+        Plain {
+          Layout.fillWidth: true
+          visible: view.cmp !== null && Number(view.cmp.onlyInstalledCount) === 0 && Number(view.cmp.onlySourceCount) === 0
+          text: "Both scans report the same findings."
+          color: view.foreground
+          opacity: 0.7
+          font.family: view.fontFamily
+        }
+
+        Button {
+          text: view.showSourceReport ? "Hide the source report" : "Show the source report"
+          bordered: true
+          foreground: view.foreground
+          accent: view.accent
+          fontFamily: view.fontFamily
+          onClicked: view.showSourceReport = !view.showSourceReport
         }
       }
 
       Repeater {
-        model: view.scout.report ? view.scout.report.checks : []
+        model: view.scout.report && (view.cmp === null || view.showSourceReport) ? view.scout.report.checks : []
 
         // One card for each check, with a bar down its left edge in the
         // colour of its worst finding.

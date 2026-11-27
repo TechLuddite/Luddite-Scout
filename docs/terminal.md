@@ -40,4 +40,4 @@ bin/scout --plugin ID                 # scan the installed copy
 bin/scout --plugin ID --compare       # scan the copy and its source, and report the difference
 ```
 
-`--compare` reports the installed commit against the source's latest commit, the installed files that differ from the source at the installed commit, and the findings that appear in one report and not the other. S1 is left out of that last list, because a folder on disk has no repository settings. Add `--gh-token` to `--compare` to use the GitHub CLI login, and `--json` to any of the three for JSON.
+`--compare` opens with a verdict, MATCHES or DIFFERS, for the installed files against the source at the installed commit. It then lists each changed file with up to 40 differing lines, added and missing files, how many commits newer the source is, and the findings that only one of the two scans reports. S1 is left out of that last list, because a folder on disk has no repository settings. Add `--gh-token` to `--compare` to use the GitHub CLI login, and `--json` to any of the three for JSON.
