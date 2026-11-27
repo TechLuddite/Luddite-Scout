@@ -72,7 +72,7 @@ function countLines(text, upTo) {
 }
 
 // One hit for each line a pattern matches on, in file order.
-function trapHits(rx, text) {
+export function trapHits(rx, text) {
   const out = [];
   let last = -1;
   rx.lastIndex = 0;
@@ -85,7 +85,7 @@ function trapHits(rx, text) {
   return out;
 }
 
-function trapFinding(severity, title, hits) {
+export function trapFinding(severity, title, hits) {
   return { severity, title, line: hits[0].line, count: hits.length, samples: hits.slice(0, MAX_SAMPLES).map((h) => ({ line: h.line, text: h.text })) };
 }
 

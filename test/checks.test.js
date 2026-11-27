@@ -14,6 +14,7 @@ import { lockfileParser } from '../js/checks/lockfiles.js';
 import { advisoryFindings } from '../js/checks/deps.js';
 import { readManifest, analyzePluginFile, analyzePluginTree } from '../js/checks/omarchy.js';
 import { analyzeTrapFile } from '../js/checks/traps.js';
+import { analyzeTelemetryText } from '../js/checks/telemetry.js';
 
 const cases = JSON.parse(readFileSync(new URL('./fixtures/cases.json', import.meta.url), 'utf8'));
 const text = (t) => (Array.isArray(t) ? t.join('') : t);
@@ -107,6 +108,10 @@ test('omarchy plugin', () => {
 
 test('agent traps', () => {
   for (const c of cases.trap_file) assertFindings(analyzeTrapFile(c.path, text(c.text)), c);
+});
+
+test('telemetry', () => {
+  for (const c of cases.telemetry_file) assertFindings(analyzeTelemetryText(c.path, text(c.text)), c);
 });
 
 test('browser-only helpers', () => {

@@ -27,6 +27,7 @@ Four ways to use it, all running the same checks:
 | S6 Build-time code | Code that runs on install, build or entry |
 | S7 Omarchy plugin | The patterns the Omarchy plugin marketplace reviewers block most often |
 | S8 Agent traps | Text that tells an agent to stop or to leave the repository unexamined, shell functions, aliases and files named after agent commands, decoy file names, and text about sending agents the wrong way |
+| S9 Telemetry | Hosts and packages of telemetry, analytics and error-reporting services, packages that report each install, code that reads a machine identifier, and the names of telemetry settings |
 
 Findings are pattern matches for a person to judge. A clean report is not proof that a repository is safe. [docs/checks.md](docs/checks.md) has the full list, what each status means, and example reports.
 
