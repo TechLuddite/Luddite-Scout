@@ -187,14 +187,56 @@ ColumnLayout {
     function onTargetChanged() { if (repoField.text !== view.scout.target) repoField.text = view.scout.target }
   }
 
+  // While a run is in progress: three squares that light in turn, and the
+  // status in bold in the theme's accent colour.
+  RowLayout {
+    Layout.fillWidth: true
+    visible: view.scout.running
+    spacing: Style.spacing.lg
+
+    Row {
+      Layout.alignment: Qt.AlignVCenter
+      spacing: Style.spacing.xs
+      Repeater {
+        model: 3
+        delegate: Rectangle {
+          required property int index
+          width: Style.space(7)
+          height: width
+          radius: Style.cornerRadius
+          color: view.accent
+          opacity: view.tick % 3 === index ? 1.0 : 0.25
+          scale: view.tick % 3 === index ? 1.0 : 0.8
+          Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.InOutQuad } }
+          Behavior on scale { NumberAnimation { duration: 260; easing.type: Easing.InOutQuad } }
+        }
+      }
+    }
+
+    Plain {
+      Layout.fillWidth: true
+      text: view.scout.mode === "installed" ? "Reading the plugins folder and the package database."
+        : "Scanning. This can take a couple of minutes."
+      color: view.accent
+      font.family: view.fontFamily
+      font.bold: true
+    }
+  }
+
+  // Runs only while a scan does, and only while this view is on screen.
+  property int tick: 0
+  Timer {
+    interval: 320
+    repeat: true
+    running: view.scout.running && view.visible
+    onTriggered: view.tick = (view.tick + 1) % 3
+  }
+
   Plain {
     Layout.fillWidth: true
-    visible: view.scout.running || view.scout.errorText !== ""
-    text: view.scout.running
-      ? (view.scout.mode === "installed" ? "Reading the plugins folder and the package database." : "Scanning. A large repository takes up to a minute.")
-      : view.scout.errorText
-    color: view.scout.errorText !== "" && !view.scout.running ? view.urgent : view.foreground
-    opacity: view.scout.running ? 0.7 : 1.0
+    visible: !view.scout.running && view.scout.errorText !== ""
+    text: view.scout.errorText
+    color: view.urgent
     font.family: view.fontFamily
   }
 
