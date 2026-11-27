@@ -13,6 +13,7 @@ import { findSecurityPolicy } from '../js/checks/setup.js';
 import { lockfileParser } from '../js/checks/lockfiles.js';
 import { advisoryFindings } from '../js/checks/deps.js';
 import { readManifest, analyzePluginFile, analyzePluginTree } from '../js/checks/omarchy.js';
+import { analyzeTrapFile } from '../js/checks/traps.js';
 
 const cases = JSON.parse(readFileSync(new URL('./fixtures/cases.json', import.meta.url), 'utf8'));
 const text = (t) => (Array.isArray(t) ? t.join('') : t);
@@ -102,6 +103,10 @@ test('omarchy plugin', () => {
     const entries = c.entries.map(([path, size]) => ({ type: 'blob', path, size }));
     assertFindings(analyzePluginTree(entries, c.readme), c);
   }
+});
+
+test('agent traps', () => {
+  for (const c of cases.trap_file) assertFindings(analyzeTrapFile(c.path, text(c.text)), c);
 });
 
 test('browser-only helpers', () => {

@@ -1608,6 +1608,182 @@ def run_omarchy(ctx):
     return {"status": "partial" if unread or ctx.truncated else "ran", "notes": notes, "findings": findings, "facts": facts}
 
 
+# ------------------------------------------------------------ S8 agent traps
+
+# Text and files aimed at a coding agent to make it stop, to send it the
+# wrong way, or to stand in for its command. The patterns use ASCII classes
+# so that js/checks/traps.js matches the same text.
+AGENT_COMMANDS = r"(?:rea|claude|codex|gemini|cursor-agent|opencode|aider|copilot|goose|crush|grok|qwen|amp)"
+_AGENT_NOUN = r"(?:ai|llm|(?:large )?language model|(?:ai|coding|automated) (?:agent|assistant|tool|system|model)|agent|assistant|chatbot)"
+_AGENT_NAME = r"(?:ai|llm|claude|codex|chatgpt|gpt|gemini|copilot|cursor|agent|assistant)"
+_NEGATE = (r"(?:do not|don['’]t|must not|should not|shall not|may not|never|refuse to|decline to|stop|cease|halt|abort"
+           r"|not (?:permitted|allowed|authori[sz]ed) to|prohibited from|forbidden (?:to|from))")
+_ANALYSE = r"(?:analy[sz]\w*|reverse[- ]engineer\w*|decompil\w*|disassembl\w*|deobfuscat\w*|summari[sz]\w*|explain\w*|describ\w*|inspect\w*|examin\w*|index\w*|scrap\w*|train\w*)"
+_CARRY_ON = r"(?:assist\w*|help\w*|proceed\w*|continu\w*|respond\w*|answer\w*|comply\w*)"
+_LIMIT = (r"(?:read\w*|review\w*|process\w*|us(?:e|ing)|run\w*|execut\w*|invok\w*|launch\w*|attempt\w*|access\w*|clon\w*"
+          r"|download\w*|copy\w*|extract\w*|generat\w*|produc\w*|output\w*)")
+_TARGET = (r"(?:(?:\s*,\s*|\s+(?:or|and|nor)\s+)\w+){0,3}\s+(?:(?:any|all|anything)\s+(?:of\s+|in\s+)?)?(?:this|the|any|its)\s+(?:\w+\s+)?"
+           r"(?:repo|repository|code|codebase|project|source|files?|binary|software|application|program)\b")
+_F = re.I | re.A
+TRAP_ADDRESSED = re.compile(
+    r"\b(?:if you(?: are|['’]re)|you are|as) an? " + _AGENT_NOUN + r"\b"
+    r"|\b(?:attention|notice|note|warning|message|instructions?|directive)\b[^.\n]{0,20}\b(?:to|for)(?: all| any| every)? " + _AGENT_NAME + r"(?: (?:coding )?(?:agents?|assistants?|models?|tools?))?\b"
+    r"|\b(?:ai|llm)(?: coding)? (?:agents?|assistants?|models?|tools?|systems?)\s*(?::|must|should|shall|may not|are (?:not|prohibited|forbidden))"
+    r"|\b(?:dear|hey|hello|attention) " + _AGENT_NAME + r"\b", _F)
+TRAP_NO_ANALYSIS = re.compile(r"\b" + _NEGATE + r"\s+(?:\w+\s+){0,4}?" + _ANALYSE, _F)
+TRAP_NO_ANALYSIS_OF = re.compile(r"\b" + _NEGATE + r"\s+(?:\w+\s+){0,4}?" + _ANALYSE + _TARGET, _F)
+TRAP_NO_WORK = re.compile(
+    r"\b" + _NEGATE + r"\s+(?:\w+\s+){0,4}?" + _CARRY_ON +
+    r"|\b(?:stop|halt|abort|terminate|end)\b[^.\n]{0,30}\b(?:immediately|now|at once|(?:the|this|your) (?:session|conversation|task|analysis)|all (?:work|analysis|processing))", _F)
+TRAP_LIMIT = re.compile(r"\b" + _NEGATE + r"\s+(?:\w+\s+){0,4}?" + _LIMIT, _F)
+TRAP_SHOUT = re.compile(r"\b(?:STOP|HALT|ABORT|REFUSE|DO NOT PROCEED|DO NOT CONTINUE)\b", re.A)
+TRAP_SHIM = re.compile(
+    r"^[ \t]*(?:function\s+" + AGENT_COMMANDS + r"\b(?![-.\w])|" + AGENT_COMMANDS + r"\s*\(\s*\)|alias\s+(?:-g\s+)?" + AGENT_COMMANDS + r"="
+    r"|Set-Alias\s+(?:-Name\s+)?" + AGENT_COMMANDS + r"\b(?![-.\w])|doskey\s+" + AGENT_COMMANDS + r"=)", _F | re.M)
+TRAP_STARTUP = re.compile(r"(?:>>|\btee\s+-a\b|\bAdd-Content\b|\bOut-File\b[^\n]{0,40}-Append)[^\n]{0,80}(?:\.bashrc|\.zshrc|\.zshenv|\.bash_profile|\.profile\b|config\.fish|\$PROFILE)", _F)
+TRAP_MISLEAD = re.compile(
+    r"\b(?:mislead\w*|confus\w*|poison\w*|trap\w*|derail\w*|sabotag\w*|deceiv\w*|trick\w*|blind\w*|exhaust\w*|wast\w*|drain\w*|flood\w*|overwhelm\w*|stall\w*|bait\w*)\b[^.\n]{0,60}\b(?:ai|llm)s?\b(?: (?:coding )?(?:agents?|assistants?|models?|tools?|analysis|scrapers?|crawlers?))?"
+    r"|\b(?:ai|llm)s?(?: (?:coding )?(?:agents?|assistants?|models?|tools?))?\b[^.\n]{0,40}\b(?:rabbit holes?|context (?:window )?(?:exhaustion|flooding|poisoning|pollution)|token (?:burn\w*|drain\w*|wast\w*))"
+    r"|\b(?:anti[- ]?(?:ai|llm|agent)\b|(?:agent|llm|ai)[- ]traps?\b|context[- ]poison\w*)", _F)
+TRAP_TOOL = re.compile(r"\banti[-_ ]?rea\b|\bblind\s+llm\s+agents\b", _F)
+TRAP_NAME = re.compile(r"(?:^|[/._-])(?:decoys?|honeypots?|honeytokens?|canary[-_]?tokens?|rabbit[-_]?holes?|(?:agent|llm|ai)[-_]?traps?)(?:[/._-]|$)", _F)
+TRAP_SHIM_FILE = re.compile(r"(?:^|/)" + AGENT_COMMANDS + r"(?:\.(?:sh|bash|zsh|fish|bat|cmd|ps1|exe))?$", _F)
+SHELL_TEXT_EXT = {"", "sh", "bash", "zsh", "fish", "ksh", "ps1", "psm1", "bat", "cmd", "md", "mdc", "txt", "tmpl", "template", "envrc"}
+TRAP_MAX_SAMPLES = 5
+TRAP_MISLEAD_MANY = 3
+
+
+def _line_start(text, i):
+    return text.rfind("\n", 0, i) + 1
+
+
+def _line_text(text, i):
+    end = text.find("\n", i)
+    return text[_line_start(text, i):len(text) if end == -1 else end]
+
+
+def _lines_around(text, i, n=3, cap=800):
+    """The line before offset i, the line holding it and the n - 1 lines after."""
+    end = _line_start(text, i)
+    start = _line_start(text, end - 1) if end else 0
+    for _ in range(n):
+        nl = text.find("\n", end)
+        if nl == -1:
+            end = len(text)
+            break
+        end = nl + 1
+    return text[start:min(end, start + cap)]
+
+
+def _trap_hits(rx, text):
+    """One hit for each line a pattern matches on, in file order."""
+    out, last = [], -1
+    for m in rx.finditer(text):
+        start = _line_start(text, m.start())
+        if start == last:
+            continue
+        last = start
+        out.append({"line": text.count("\n", 0, start) + 1, "text": truncate(_line_text(text, m.start()).strip(), 200), "at": m.start()})
+    return out
+
+
+def _trap_finding(severity, rule, title, hits):
+    return {"severity": severity, "rule": rule, "title": title, "line": hits[0]["line"], "count": len(hits),
+            "samples": [{"line": h["line"], "text": h["text"]} for h in hits[:TRAP_MAX_SAMPLES]]}
+
+
+def analyze_trap_path(path):
+    out = []
+    if TRAP_NAME.search(path):
+        out.append({"severity": "low", "rule": "S8.decoy-name", "title": "Name suggests decoy or bait content"})
+    if TRAP_SHIM_FILE.search(path):
+        out.append({"severity": "low", "rule": "S8.shim-file", "title": "File named after an agent command. It runs in place of that command if its folder is on PATH."})
+    return out
+
+
+def analyze_trap_text(path, text):
+    agent_file = bool(classify_agent_path(path))
+    out = []
+    no_analysis, no_work, limits, addressed = [], [], [], []
+    seen = set()
+    for h in _trap_hits(TRAP_ADDRESSED, text):
+        window = _lines_around(text, h["at"])
+        # An instruction file addresses an agent as a matter of course, so
+        # there the refusal must name the repository or its code.
+        if (TRAP_NO_ANALYSIS_OF if agent_file else TRAP_NO_ANALYSIS).search(window):
+            no_analysis.append(h)
+        elif TRAP_NO_WORK.search(window) or TRAP_SHOUT.search(window):
+            no_work.append(h)
+        elif TRAP_LIMIT.search(window):
+            limits.append(h)
+        else:
+            addressed.append(h)
+        seen.add(h["line"])
+    if agent_file:
+        no_analysis += [h for h in _trap_hits(TRAP_NO_ANALYSIS_OF, text) if h["line"] not in seen]
+        no_analysis.sort(key=lambda h: h["line"])
+    if no_analysis:
+        out.append(_trap_finding("high" if agent_file else "medium", "S8.stop-analysis", "Tells an AI agent not to analyse or explain the repository", no_analysis))
+    if no_work:
+        out.append(_trap_finding("medium" if agent_file else "low", "S8.stop-work", "Tells an AI agent to stop or refuse work", no_work))
+    if limits:
+        out.append(_trap_finding("low", "S8.stop-work", "Tells an AI agent to stop or refuse work", limits))
+    if addressed and not agent_file:
+        out.append(_trap_finding("low", "S8.agent-addressed", "Addresses an AI agent from outside the instruction files", addressed))
+    if extension(path) in SHELL_TEXT_EXT:
+        hits = _trap_hits(TRAP_SHIM, text)
+        if hits:
+            out.append(_trap_finding("medium", "S8.command-shim", "Defines a shell function or alias named after an agent command", hits))
+    hits = _trap_hits(TRAP_STARTUP, text)
+    if hits:
+        out.append(_trap_finding("low", "S8.shell-startup-edit", "Appends to a shell startup file", hits))
+    hits = _trap_hits(TRAP_MISLEAD, text)
+    if hits:
+        many = agent_file or len(hits) >= TRAP_MISLEAD_MANY
+        out.append(_trap_finding("medium" if many else "low", "S8.misleads-agents", "Describes misleading, trapping or exhausting an AI agent", hits))
+    hits = _trap_hits(TRAP_TOOL, text)
+    if hits:
+        out.append(_trap_finding("medium", "S8.known-trap-tool", "Names a tool built to trap or mislead AI agents", hits))
+    return out
+
+
+def analyze_trap_file(path, text):
+    return analyze_trap_path(path) + analyze_trap_text(path, text)
+
+
+def run_traps(ctx, max_files=4000, max_bytes=60_000_000):
+    findings = []
+    for e in ctx.entries:
+        if e["type"] == "blob":
+            findings += [{**f, "path": e["path"]} for f in analyze_trap_path(e["path"])]
+        elif TRAP_NAME.search(e["path"]) and e["type"] == "tree":
+            findings.append({"severity": "low", "rule": "S8.decoy-name", "title": "Name suggests decoy or bait content", "path": e["path"]})
+    candidates = ctx.text_blobs()
+    selected, budget = [], max_bytes
+    for b in candidates:
+        if len(selected) >= max_files or b.get("size", 0) > budget:
+            break
+        selected.append(b)
+        budget -= b.get("size", 0)
+    not_covered = len(candidates) - len(selected)
+    scanned = skipped = 0
+    for path, res in ctx.fetch_many([b["path"] for b in selected]):
+        if "text" not in res:
+            skipped += 1
+            continue
+        scanned += 1
+        findings += [{**f, "path": path} for f in analyze_trap_text(path, res["text"])]
+    findings.sort(key=lambda f: -RANK[f["severity"]])
+    notes = [f"Scanned {scanned} text files and {len(ctx.entries)} names."]
+    if skipped:
+        notes.append(f"{skipped} files could not be read as text (binary, too large, or not served).")
+    if not_covered:
+        notes.append(f"{not_covered} files not read because of the size or count cap.")
+    if ctx.truncated:
+        notes.append("The file list from GitHub was truncated, so some files were never listed.")
+    return {"status": "partial" if not_covered or ctx.truncated else "ran", "notes": notes, "findings": findings}
+
+
 # ------------------------------------------------------------------- scan
 
 CHECKS = [
@@ -1618,8 +1794,9 @@ CHECKS = [
     ("S5", "Dependencies", run_deps),
     ("S6", "Build-time code", run_build),
     ("S7", "Omarchy plugin", run_omarchy),
+    ("S8", "Agent traps", run_traps),
 ]
-RUN_ORDER = ["S1", "S2", "S4", "S6", "S7", "S5", "S3"]
+RUN_ORDER = ["S1", "S2", "S4", "S6", "S7", "S5", "S3", "S8"]
 
 
 class Context:
@@ -2008,6 +2185,15 @@ RULES = {
     "S7.agent-files": "Agent instruction files are installed with the plugin",
     "S7.no-preview": "No preview image at the root",
     "S7.no-removal-docs": "README does not explain removal",
+    "S8.stop-analysis": "Text tells an AI agent not to analyse or explain the repository",
+    "S8.stop-work": "Text tells an AI agent to stop or refuse work",
+    "S8.agent-addressed": "Text outside the instruction files addresses an AI agent",
+    "S8.command-shim": "Shell function or alias named after an agent command",
+    "S8.shim-file": "File named after an agent command",
+    "S8.shell-startup-edit": "Script appends to a shell startup file",
+    "S8.misleads-agents": "Text describes misleading, trapping or exhausting an AI agent",
+    "S8.known-trap-tool": "Text names a tool built to trap or mislead AI agents",
+    "S8.decoy-name": "File or folder name suggests decoy or bait content",
     "unclassified": "Finding without a rule ID. Read the full report.",
 }
 STATUSES = {"ran", "partial", "skipped", "not-applicable"}

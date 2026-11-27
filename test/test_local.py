@@ -64,7 +64,7 @@ class LocalScan(unittest.TestCase):
         r = self.scan()
         self.assertEqual(r["tool"], "luddite-scout")
         self.assertEqual(r["repository"], "demo")
-        self.assertEqual([c["id"] for c in r["checks"]], ["S1", "S2", "S3", "S4", "S5", "S6", "S7"])
+        self.assertEqual([c["id"] for c in r["checks"]], ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"])
         for c in r["checks"]:
             self.assertIn(c["status"], scout.STATUSES, c["id"])
 
