@@ -36,8 +36,8 @@ These scan the author's own repositories.
 
 The summary for [TechLuddite/NetReady](https://github.com/TechLuddite/NetReady), a website project, so S7 does not apply:
 
-![Website report summary for TechLuddite/NetReady, listing S1 to S7 with their status and finding counts](screenshots/website-summary.png)
+![Website report summary for TechLuddite/NetReady, listing S1 to S9 with their status and finding counts](screenshots/website-summary.png)
 
 The S7 card for [TechLuddite/luddite-gestures](https://github.com/TechLuddite/luddite-gestures), an Omarchy plugin, with each finding linked to the line it came from:
 
-![S7 Omarchy plugin card for TechLuddite/luddite-gestures, showing four medium findings with file and line links](screenshots/website-omarchy-check.png)
+![S7 Omarchy plugin card for TechLuddite/luddite-gestures, showing one medium finding with file and line links](screenshots/website-omarchy-check.png)

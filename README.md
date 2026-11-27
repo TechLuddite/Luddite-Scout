@@ -1,10 +1,21 @@
 # Luddite Scout
 
+[![test](https://github.com/TechLuddite/Luddite-Scout/actions/workflows/test.yml/badge.svg)](https://github.com/TechLuddite/Luddite-Scout/actions/workflows/test.yml)
+[![version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FTechLuddite%2FLuddite-Scout%2Fmain%2Fmanifest.json&query=%24.version&label=version&color=blue)](manifest.json)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+![status: experimental](https://img.shields.io/badge/status-experimental-orange)
+![runtime dependencies: none](https://img.shields.io/badge/runtime%20dependencies-none-brightgreen)
+![Python: standard library only](https://img.shields.io/badge/Python-standard%20library%20only-3776AB?logo=python&logoColor=white)
+![JavaScript: no build step](https://img.shields.io/badge/JavaScript-no%20build%20step-F7DF1E?logo=javascript&logoColor=black)
+![QML: Omarchy plugin](https://img.shields.io/badge/QML-Omarchy%20plugin-41CD52?logo=qt&logoColor=white)
+
 A pre-flight check for a public GitHub repository, run before you point a coding agent at it, build it, or install it. Give it a repository and get a report a person can read in a few minutes. It never runs code from the repository.
 
-**Status:** experimental, under active development.
+![The Luddite Scout window showing a report for TechLuddite/luddite-gestures, with severity totals and one card for each check](docs/screenshots/plugin-report.png)
 
-![The Luddite Scout panel open under the Omarchy bar, showing a report for TechLuddite/luddite-gestures](docs/screenshots/omarchy-desktop.png)
+**Contents:** [Front ends](#front-ends) · [What it checks](#what-it-checks) · [Omarchy plugin](#omarchy-plugin) · [Terminal](#terminal) · [Documentation](#documentation) · [Credits](#credits) · [Help and security](#help-and-security) · [Licence](#licence)
+
+## Front ends
 
 Four ways to use it, all running the same checks:
 
@@ -29,7 +40,13 @@ Four ways to use it, all running the same checks:
 | S8 Agent traps | Text that tells an agent to stop or to leave the repository unexamined, shell functions, aliases and files named after agent commands, decoy file names, and text about sending agents the wrong way |
 | S9 Telemetry | Hosts and packages of telemetry, analytics and error-reporting services, packages that report each install, code that reads a machine identifier, and the names of telemetry settings |
 
+| S10 AUR build recipe | Terminal and plugin only, for one AUR package: checksums, unpinned checkouts, downloads inside build functions, `sudo`, and what the install script does as root |
+
 Findings are pattern matches for a person to judge. A clean report is not proof that a repository is safe. [docs/checks.md](docs/checks.md) has the full list, what each status means, and example reports.
+
+The website's summary for [TechLuddite/NetReady](https://github.com/TechLuddite/NetReady):
+
+![Website report summary for TechLuddite/NetReady, listing S1 to S9 with their status and finding counts](docs/screenshots/website-summary.png)
 
 ## Omarchy plugin
 
@@ -38,13 +55,35 @@ omarchy plugin add https://github.com/TechLuddite/Luddite-Scout
 omarchy plugin enable io.github.techluddite.luddite-scout
 ```
 
-To remove it:
+The bar icon opens a panel. One button opens the same view as a normal window, which follows the theme and the glassy windows setting.
+
+The puzzle button lists your installed Omarchy plugins and the packages you installed from outside the pacman repositories, with the repository each came from:
+
+![The installed plugins list, showing three TechLuddite plugins with Installed, Source and Compare buttons](docs/screenshots/plugin-installed.png)
+
+Compare checks an installed plugin against its source and shows only what differs: changed lines, added and missing files, and how far behind the source it is.
+
+![A comparison of an installed copy of luddite-gestures against TechLuddite/luddite-gestures, reporting one changed file with its changed line and one added file](docs/screenshots/plugin-compare.png)
+
+To remove the plugin:
 
 ```sh
 omarchy plugin remove io.github.techluddite.luddite-scout
 ```
 
 The plugin keeps no state, cache, credentials or configuration, so nothing is left behind. See [docs/omarchy-plugin.md](docs/omarchy-plugin.md) for what it runs and what it contacts.
+
+## Terminal
+
+```sh
+bin/scout TechLuddite/NetReady          # a readable report
+bin/scout --dir .                       # the same checks on a local checkout
+bin/scout --installed                   # installed Omarchy plugins and foreign packages
+bin/scout --plugin ID --compare         # an installed plugin against its source
+bin/scout --aur NAME                    # the build recipe of an AUR package
+```
+
+One Python file, standard library only. [docs/terminal.md](docs/terminal.md) has every option.
 
 ## Documentation
 
