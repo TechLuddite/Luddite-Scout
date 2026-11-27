@@ -128,6 +128,10 @@ class SharedCases(unittest.TestCase):
         for c in CASES["trap_file"]:
             self.assert_findings(scout.analyze_trap_file(c["path"], text(c["text"])), c)
 
+    def test_telemetry(self):
+        for c in CASES["telemetry_file"]:
+            self.assert_findings(scout.analyze_telemetry_text(c["path"], text(c["text"])), c)
+
 
 class Network(unittest.TestCase):
     def test_refuses_hosts_outside_allowlist(self):

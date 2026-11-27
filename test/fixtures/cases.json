@@ -357,5 +357,15 @@
     {"name": "several lines about misleading agents are medium", "path": "docs/design.md", "text": ["We pois", "on the A", "I context.\nDecoys der", "ail L", "LM analysis.\nThe goal is to send A", "I agents down rabbit holes.\n"], "has": [{"severity": "medium", "title": "misleading, trapping or exhausting", "count": 3}]},
     {"name": "named trap tool", "path": "README.md", "text": ["Protected with anti", "rea.\nSee also Blind L", "LM Agents.\n"], "has": [{"severity": "medium", "title": "Names a tool built to trap or mislead AI agents", "count": 2}]},
     {"name": "plain prose has no findings", "path": "README.md", "text": "A tool for training new staff.\nStop the server before you continue.\nThe agent of the estate may not use the address.\n", "has": []}
+  ],
+  "telemetry_file": [
+    {"name": "collector host in code", "path": "src/report.js", "text": ["fetch('https://o1.ingest.sen", "try.io/api/1/store/');\nconst other = 'https://example.com';\n"], "has": [{"severity": "low", "title": "Names a telemetry, analytics or error-reporting service", "line": 1, "count": 1}]},
+    {"name": "host as part of another name is ignored", "path": "src/a.js", "text": ["const u = 'https://notsen", "try.io.example.org/x';\n"], "has": []},
+    {"name": "package in a manifest", "path": "package.json", "text": ["{\"dependencies\":{\"@sen", "try/node\":\"8.0.0\",\n\"posthog", "-js\":\"1.0.0\",\n\"left-pad\":\"1.0.0\"}}\n"], "has": [{"severity": "low", "title": "Depends on a telemetry, analytics or error-reporting package", "count": 2}]},
+    {"name": "package name outside a manifest is ignored", "path": "src/notes.py", "text": ["import sen", "try_sdk\n"], "has": []},
+    {"name": "install-time reporting package", "path": "web/package.json", "text": ["{\"dependencies\":{\"@sca", "rf/scarf\":\"1.4.0\"}}\n"], "has": [{"severity": "medium", "title": "reports each install to its maintainer", "line": 1}]},
+    {"name": "machine identifier in code", "path": "lib/id.sh", "text": ["id=$(cat /etc/mach", "ine-id)\n"], "has": [{"severity": "low", "title": "Reads an identifier of the machine", "line": 1}]},
+    {"name": "machine identifier in documentation is ignored", "path": "docs/boot.md", "text": ["systemd writes /etc/mach", "ine-id on first boot.\n"], "has": []},
+    {"name": "telemetry setting", "path": "README.md", "text": ["Set NEXT_TELE", "METRY_DISABLED=1 or DO_NOT", "_TRACK=1 to turn reporting off.\nCONFIG_CONTEXT_TRACKING=y\n"], "has": [{"severity": "info", "title": "Names a telemetry setting", "line": 1, "count": 1}]}
   ]
 }
