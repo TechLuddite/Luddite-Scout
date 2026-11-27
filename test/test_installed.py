@@ -110,6 +110,34 @@ class Installed(unittest.TestCase):
         self.assertEqual([x["rule"] for x in got["onlyInstalled"]], ["S6.direnv"])
         self.assertEqual([x["rule"] for x in got["onlySource"]], ["S6.setup-py"])
 
+    def test_lists_packages_from_desc_files(self):
+        import io
+        import tarfile
+        local = pathlib.Path(self.tmp.name) / "local"
+        sync = pathlib.Path(self.tmp.name) / "sync"
+        sync.mkdir()
+        def pkg(folder, name, url, reason=None):
+            (local / folder).mkdir(parents=True)
+            body = "%%NAME%%\n%s\n\n%%VERSION%%\n1.0-1\n\n%%URL%%\n%s\n\n" % (name, url)
+            if reason:
+                body += "%%REASON%%\n%s\n\n" % reason
+            (local / folder / "desc").write_text(body)
+        pkg("bat-1.0-1", "bat", "https://github.com/sharkdp/bat")
+        pkg("aur-tool-1.0-1", "aur-tool", "https://github.com/someone/aur-tool.git")
+        pkg("dep-1.0-1", "dep", "https://github.com/x/dep", reason="1")
+        pkg("git-1.0-1", "git", "https://git-scm.com/")
+        pkg("odd-1.0-1", "odd", "https://github.com.example.org/x/y")
+        with tarfile.open(sync / "extra.db", "w:gz") as tar:
+            for d in ("bat-1.0-1", "git-1.0-1"):
+                info = tarfile.TarInfo(d)
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+        rows = scout.list_packages(str(local), str(sync))
+        self.assertEqual([(r["name"], r["source"], r["foreign"], r["repo"]) for r in rows],
+                         [("aur-tool", "someone/aur-tool", True, ""), ("bat", "sharkdp/bat", False, "extra")])
+        rows = scout.list_packages(str(local), str(pathlib.Path(self.tmp.name) / "missing"))
+        self.assertEqual([r["foreign"] for r in rows], [None, None])
+
     def test_command_line(self):
         self.assertEqual(scout.main(["--installed", "extra"]), 2)
         self.assertEqual(scout.main(["--plugin", "a.one", "--agent"]), 2)

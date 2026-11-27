@@ -14,7 +14,9 @@ Reviews a public GitHub repository with the same checks as the web page
                                 checks except repository settings (S1);
                                 --name owner/repo and --commit SHA label it
     scout --installed           list the installed Omarchy shell plugins with
-                                the GitHub repository each was cloned from
+                                the GitHub repository each was cloned from,
+                                and the pacman packages installed by name
+                                whose home page is a GitHub repository
     scout --plugin ID           scan the installed copy of one of them
     scout --plugin ID --compare scan the installed copy and its source, and
                                 report how the two differ
@@ -2276,7 +2278,81 @@ def list_installed():
         except (ScanError, ValueError):
             continue
         rows.append({k: v for k, v in info.items() if k != "root"})
-    return {"tool": "luddite-scout", "version": VERSION, "installed": rows}
+    return {"tool": "luddite-scout", "version": VERSION, "installed": rows, "packages": list_packages()}
+
+
+# pacman keeps one folder per installed package, with a plain-text desc file.
+# Reading those files lists what is installed without running pacman. A
+# package is "foreign" when no sync database names it, which is how pacman
+# itself tells an AUR or locally built package from a repository one.
+PACMAN_LOCAL = "/var/lib/pacman/local"
+PACMAN_SYNC = "/var/lib/pacman/sync"
+PACKAGE_NAME = re.compile(r"^[a-z0-9@._+][a-z0-9@._+-]{0,127}$")
+GITHUB_URL = re.compile(r"^https?://(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?(?:[#?].*)?$")
+PACKAGES_MAX = 500
+SYNC_DB_MAX_BYTES = 64_000_000
+
+
+def _desc_fields(text):
+    out, key = {}, None
+    for line in text.split("\n"):
+        if re.fullmatch(r"%[A-Z0-9]+%", line):
+            key = line.strip("%")
+        elif line and key and key not in out:
+            out[key] = line
+    return out
+
+
+def sync_package_names(sync_dir=None):
+    """{package name: repository name} from pacman's sync databases, or None
+    when none could be read."""
+    import tarfile
+    sync_dir = sync_dir or PACMAN_SYNC
+    names, read_any = {}, False
+    try:
+        dbs = sorted(n for n in os.listdir(sync_dir) if n.endswith(".db"))
+    except OSError:
+        return None
+    for db in dbs[:50]:
+        path = os.path.join(sync_dir, db)
+        try:
+            if os.path.islink(path) and not os.path.isfile(path):
+                continue
+            if os.path.getsize(path) > SYNC_DB_MAX_BYTES:
+                continue
+            with tarfile.open(path, "r:*") as tar:
+                for member in tar:
+                    if member.isdir():
+                        m = re.fullmatch(r"(.+)-[^-]+-[^-]+", member.name.strip("/"))
+                        if m:
+                            names.setdefault(m.group(1), db[:-3])
+            read_any = True
+        except (OSError, tarfile.TarError, EOFError, ValueError, ImportError):
+            continue
+    return names if read_any else None
+
+
+def list_packages(local_dir=None, sync_dir=None):
+    """Explicitly installed packages whose home page is a GitHub repository."""
+    local_dir = local_dir or PACMAN_LOCAL
+    try:
+        folders = sorted(os.listdir(local_dir))
+    except OSError:
+        return []
+    known = sync_package_names(sync_dir)
+    rows = []
+    for folder in folders[:20000]:
+        fields = _desc_fields(_read_small(os.path.join(local_dir, folder, "desc"), 400_000) or "")
+        name = fields.get("NAME", "")
+        if not PACKAGE_NAME.match(name) or fields.get("REASON") == "1":
+            continue
+        m = GITHUB_URL.match(fields.get("URL", ""))
+        if not m:
+            continue
+        rows.append({"name": name, "version": truncate(fields.get("VERSION", ""), 60), "source": f"{m.group(1)}/{m.group(2)}",
+                     "repo": None if known is None else known.get(name, ""), "foreign": None if known is None else name not in known})
+    rows.sort(key=lambda r: (r["foreign"] is not True, r["name"]))
+    return rows[:PACKAGES_MAX]
 
 
 def scan_plugin(pid):
@@ -2366,6 +2442,11 @@ def format_installed(listing):
     lines = []
     for r in listing["installed"]:
         lines.append("  ".join([r["id"], r["source"] or "(no GitHub origin)", (r["commit"] or "")[:12], "linked" if r["linked"] else ""]).rstrip())
+    if listing.get("packages"):
+        lines += ["", "Packages installed by name whose home page is a GitHub repository:"]
+        for r in listing["packages"]:
+            origin = "foreign (AUR or local build)" if r["foreign"] else (r["repo"] or "")
+            lines.append("  ".join([r["name"], r["version"], r["source"], origin]).rstrip())
     return term_safe("\n".join(lines) or "No plugins are installed.").replace("⟦U+000A⟧", "\n")
 
 

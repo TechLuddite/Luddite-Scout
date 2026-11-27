@@ -55,6 +55,7 @@ Panel {
   // "scan" shows the input and a report, "installed" the plugin list.
   property string mode: "scan"
   property var installed: []
+  property var packages: []
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.popups.text
   readonly property color accent: Commons.Color.accent
@@ -139,6 +140,7 @@ Panel {
       root.errorText = data.error.slice(0, 300)
     } else if (data && data.installed !== undefined) {
       root.installed = root.list(data.installed, 500)
+      root.packages = root.list(data.packages, 500)
     } else if (data && root.list(data.checks, 21).length > 0 && root.list(data.checks, 21).length <= 20) {
       root.report = data
     } else if (code === 124 || code === 137) {
