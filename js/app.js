@@ -9,6 +9,7 @@ import { runWorkflows } from './checks/workflows.js';
 import { runDeps } from './checks/deps.js';
 import { runBuild } from './checks/build.js';
 import { runOmarchy } from './checks/omarchy.js';
+import { runTraps } from './checks/traps.js';
 
 const CHECKS = [
   { id: 'S1', name: 'Repository setup', run: runSetup },
@@ -18,9 +19,10 @@ const CHECKS = [
   { id: 'S5', name: 'Dependencies', run: runDeps },
   { id: 'S6', name: 'Build-time code', run: runBuild },
   { id: 'S7', name: 'Omarchy plugin', run: runOmarchy },
+  { id: 'S8', name: 'Agent traps', run: runTraps },
 ];
-// S3 reads every text file, so it goes last.
-const RUN_ORDER = ['S1', 'S2', 'S4', 'S6', 'S7', 'S5', 'S3'];
+// S3 and S8 read every text file, so they go last. S8 reuses the files S3 fetched.
+const RUN_ORDER = ['S1', 'S2', 'S4', 'S6', 'S7', 'S5', 'S3', 'S8'];
 const SEVERITIES = ['high', 'medium', 'low', 'info'];
 const SHOWN = 8;
 const STATUS_TEXT = { ran: 'Ran', partial: 'Partial', skipped: 'Skipped', 'not-applicable': 'Not applicable', waiting: 'Waiting', running: 'Running' };

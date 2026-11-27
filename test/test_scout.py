@@ -124,6 +124,10 @@ class SharedCases(unittest.TestCase):
             entries = [{"type": "blob", "path": p, "size": s} for p, s in c["entries"]]
             self.assert_findings(scout.analyze_plugin_tree(entries, c["readme"]), c)
 
+    def test_agent_traps(self):
+        for c in CASES["trap_file"]:
+            self.assert_findings(scout.analyze_trap_file(c["path"], text(c["text"])), c)
+
 
 class Network(unittest.TestCase):
     def test_refuses_hosts_outside_allowlist(self):
