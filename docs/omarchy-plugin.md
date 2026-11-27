@@ -15,7 +15,7 @@ The plugin needs `/usr/bin/python3`, which Omarchy ships. It has no settings.
 
 The bar icon opens a panel. Type a repository as `owner/repo` or a github.com URL and press Enter. The panel runs `bin/scout --json` under `/usr/bin/timeout`, which stops a scan after four minutes, and shows the report.
 
-![The Luddite Scout panel open under the Omarchy bar, showing a report for TechLuddite/luddite-gestures](screenshots/omarchy-desktop.png)
+![The Luddite Scout window showing a report for TechLuddite/luddite-gestures, with severity totals and one card for each check](screenshots/plugin-report.png)
 
 The report starts with the totals for each severity. Each check is a card with a bar down its left edge in the colour of its worst finding.
 
