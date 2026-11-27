@@ -181,13 +181,29 @@ Panel {
     Qt.callLater(function () { windowBody.inputField.forceActiveFocus() })
   }
 
+  // `omarchy toggle window-glassy` creates and removes this flag file. Its
+  // presence is the setting. The file is only watched, never read or run.
+  property bool glassy: false
+  readonly property real glassOpacity: 0.65
+  FileView {
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/toggles/hypr/window-glassy.lua"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.glassy = true
+    onLoadFailed: root.glassy = false
+    onFileChanged: reload()
+  }
+
   Component.onDestruction: stopScan()
 
   FloatingWindow {
     id: window
     visible: false
     title: "Luddite Scout"
-    color: Commons.Color.background
+    // Glassy windows (Appearance > Windows > Window Opacity) get a
+    // see-through background that Hyprland blurs behind, at the opacity
+    // omarchy-theme-set-glass gives terminals. Otherwise the window is solid.
+    color: Util.alpha(Commons.Color.background, root.glassy ? root.glassOpacity : 1.0)
     implicitWidth: 860
     implicitHeight: 900
     minimumSize: Qt.size(480, 360)

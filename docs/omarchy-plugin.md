@@ -19,7 +19,7 @@ The bar icon opens a panel. Type a repository as `owner/repo` or a github.com UR
 
 The report starts with the totals for each severity. Each check is a card with a bar down its left edge in the colour of its worst finding.
 
-The button next to Close opens the same view as a normal window, which Hyprland tiles like any other. The panel and the window share one scan, so a report started in one shows in the other.
+The button next to Close opens the same view as a normal window, which Hyprland tiles like any other. The panel and the window share one scan, so a report started in one shows in the other. The window follows Omarchy's Window Opacity setting: with glassy windows on, its background is see-through at the same opacity as a glassy terminal and Hyprland blurs what is behind it.
 
 ## Installed plugins
 
@@ -45,6 +45,7 @@ If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that lo
 - For the installed list it reads `~/.config/omarchy/plugins` and the package database under `/var/lib/pacman`. A plugin ID is checked against a fixed pattern before it reaches the helper, and the helper builds the folder path itself.
 - It reads at most about 2 MB of the scan's output and renders all of it as plain text.
 - It writes no files and keeps no state, cache, credentials or configuration.
+- It watches whether `~/.local/state/omarchy/toggles/hypr/window-glassy.lua` exists, to follow the glassy windows setting. It does not read or run that file.
 - It contacts the hosts listed in [data handling](data-handling.md), through `bin/scout` only. `aur.archlinux.org` is contacted only when you press Recipe.
 
 ## Remove
