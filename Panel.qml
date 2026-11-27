@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Luddite Scout: type a public GitHub repository, get the same report the
@@ -49,10 +50,12 @@ Panel {
 
   property var report: null
   property string errorText: ""
+  // What is typed in the input field, shared by the panel and the window.
+  property string target: ""
 
-  readonly property color foreground: bar ? bar.foreground : Color.popups.text
-  readonly property color accent: Color.accent
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.popups.text
+  readonly property color accent: Commons.Color.accent
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   // owner/repo, github.com/owner/repo or https://github.com/owner/repo[...].
@@ -62,8 +65,8 @@ Panel {
     return /^(https:\/\/)?(www\.)?(github\.com\/)?[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}(\/[A-Za-z0-9._\/-]{0,200})?$/.test(s)
   }
 
-  function startScan() {
-    var target = String(repoField.text || "").trim()
+  function startScan(text) {
+    var target = String(text || "").trim()
     if (!validInput(target)) {
       root.errorText = "Enter a public repository as owner/repo or a github.com URL."
       return
@@ -120,30 +123,41 @@ Panel {
     return out
   }
 
-  function severityColor(sev) {
-    return sev === "high" ? root.urgent : sev === "medium" ? root.accent : root.foreground
-  }
-
-  function countsText(findings) {
-    var c = { high: 0, medium: 0, low: 0, info: 0 }
-    for (var i = 0; i < findings.length; i++) if (c[findings[i].severity] !== undefined) c[findings[i].severity]++
-    var parts = []
-    var order = ["high", "medium", "low", "info"]
-    for (var j = 0; j < order.length; j++) if (c[order[j]]) parts.push(c[order[j]] + " " + order[j])
-    return parts.join(", ")
-  }
-
-  function statusLabel(s) {
-    return s === "ran" ? "Ran" : s === "partial" ? "Partial" : s === "skipped" ? "Skipped"
-      : s === "not-applicable" ? "Not applicable" : String(s).slice(0, 20)
-  }
-
-  function location(f) {
-    if (!f.path) return ""
-    return String(f.path).slice(0, 300) + (f.line ? ":" + Number(f.line) : "")
+  // The same view as a normal window, which Hyprland tiles like any other.
+  function openWindow() {
+    root.close()
+    window.visible = true
+    Qt.callLater(function () { windowBody.inputField.forceActiveFocus() })
   }
 
   Component.onDestruction: stopScan()
+
+  FloatingWindow {
+    id: window
+    visible: false
+    title: "Luddite Scout"
+    color: Commons.Color.background
+    implicitWidth: 860
+    implicitHeight: 900
+    minimumSize: Qt.size(480, 360)
+
+    FocusScope {
+      anchors.fill: parent
+      focus: true
+      Keys.onPressed: function (event) {
+        if (event.key === Qt.Key_Escape) { window.visible = false; event.accepted = true }
+      }
+
+      ScoutBody {
+        id: windowBody
+        anchors.fill: parent
+        anchors.margins: Style.spacing.huge
+        scout: root
+        inWindow: true
+        onCloseRequested: window.visible = false
+      }
+    }
+  }
 
   Process {
     id: scanProc
@@ -179,7 +193,7 @@ Panel {
     owner: root.hostWidget || root
     bar: root.bar
     open: root.opened
-    focusTarget: repoField
+    focusTarget: column.inputField
     contentWidth: panel.fittedContentWidth(Style.space(760))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(700))
 
@@ -190,214 +204,16 @@ Panel {
         if (event.key === Qt.Key_Escape) { root.close(); event.accepted = true }
       }
 
-      ColumnLayout {
+      ScoutBody {
         id: column
         anchors.fill: parent
-        spacing: Style.spacing.md
-
-        RowLayout {
-          Layout.fillWidth: true
-          spacing: Style.spacing.sm
-
-          ColumnLayout {
-            spacing: 0
-            Plain {
-              text: "Luddite Scout"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-            }
-            Plain {
-              text: "Checks a public GitHub repository. Runs nothing from it."
-              color: root.foreground
-              opacity: 0.6
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-          }
-
-          Item { Layout.fillWidth: true }
-
-          PanelActionButton {
-            iconText: "󰅖"
-            tooltipText: "Close (Esc)"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            onClicked: root.close()
-          }
-        }
-
-        RowLayout {
-          Layout.fillWidth: true
-          spacing: Style.spacing.sm
-
-          TextField {
-            id: repoField
-            Layout.fillWidth: true
-            maximumLength: 300
-            placeholderText: "owner/repo or https://github.com/owner/repo"
-            foreground: root.foreground
-            accent: root.accent
-            font.family: root.fontFamily
-            onAccepted: root.startScan()
-          }
-
-          Button {
-            text: root.running ? "Stop" : "Scout"
-            bordered: true
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: root.running ? root.stopScan() : root.startScan()
-          }
-        }
-
-        Plain {
-          Layout.fillWidth: true
-          visible: root.running || root.errorText !== ""
-          text: root.running ? "Scanning. A large repository takes up to a minute." : root.errorText
-          color: root.errorText !== "" && !root.running ? root.urgent : root.foreground
-          opacity: root.running ? 0.7 : 1.0
-          font.family: root.fontFamily
-        }
-
-        PanelSeparator { Layout.fillWidth: true; foreground: root.foreground; visible: root.report !== null }
-
-        Flickable {
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          visible: root.report !== null
-          implicitHeight: body.implicitHeight
-          Layout.minimumHeight: root.report ? Style.space(160) : 0
-          contentWidth: width
-          contentHeight: body.implicitHeight
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-
-          ColumnLayout {
-            id: body
-            width: parent.width
-            spacing: Style.spacing.md
-
-            Plain {
-              Layout.fillWidth: true
-              text: root.report ? String(root.report.repository).slice(0, 200) + " at " + String(root.report.commit).slice(0, 12) : ""
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-            }
-
-            Repeater {
-              model: root.report ? root.report.checks : []
-
-              delegate: ColumnLayout {
-                id: check
-                required property var modelData
-                readonly property var findings: root.list(modelData.findings, 500)
-                Layout.fillWidth: true
-                spacing: Style.spacing.xs
-
-                Plain {
-                  Layout.fillWidth: true
-                  text: String(check.modelData.id).slice(0, 4) + "  " + String(check.modelData.name).slice(0, 60)
-                    + "  ·  " + root.statusLabel(check.modelData.status)
-                    + (check.findings.length ? "  ·  " + root.countsText(check.findings) : "")
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.bold: true
-                }
-
-                Repeater {
-                  model: root.list(check.modelData.notes, 6)
-                  delegate: Plain {
-                    required property var modelData
-                    Layout.fillWidth: true
-                    text: String(modelData).slice(0, 300)
-                    color: root.foreground
-                    opacity: 0.6
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                }
-
-                Repeater {
-                  model: root.list(check.modelData.facts, 16)
-                  delegate: Plain {
-                    required property var modelData
-                    Layout.fillWidth: true
-                    text: String(modelData[0]).slice(0, 60) + ": " + String(modelData[1]).slice(0, 300)
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                }
-
-                Repeater {
-                  model: check.findings.slice(0, root.shownPerCheck)
-                  delegate: ColumnLayout {
-                    id: finding
-                    required property var modelData
-                    Layout.fillWidth: true
-                    spacing: 0
-
-                    Plain {
-                      Layout.fillWidth: true
-                      text: String(finding.modelData.severity).toUpperCase().slice(0, 6) + "  " + String(finding.modelData.title).slice(0, 300)
-                      color: root.severityColor(finding.modelData.severity)
-                      font.family: root.fontFamily
-                    }
-                    Plain {
-                      Layout.fillWidth: true
-                      visible: text !== ""
-                      text: root.location(finding.modelData)
-                      color: root.foreground
-                      opacity: 0.6
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                  }
-                }
-
-                Plain {
-                  Layout.fillWidth: true
-                  visible: check.findings.length > root.shownPerCheck
-                  text: (check.findings.length - root.shownPerCheck) + " more. The website and bin/scout show the full list."
-                  color: root.foreground
-                  opacity: 0.6
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
-            }
-          }
-        }
-
-        RowLayout {
-          Layout.fillWidth: true
-          spacing: Style.spacing.sm
-
-          Plain {
-            Layout.fillWidth: true
-            text: root.report && root.report.api
-              ? "GitHub API, " + (root.report.api.authenticated === true ? "signed in through gh" : "anonymous") + ": "
-                + Number(root.report.api.remaining) + " of " + Number(root.report.api.limit) + " requests left this hour."
-                + (root.report.api.tokenRejected === true ? " GitHub rejected the gh token." : "")
-              : "Findings are pattern matches for you to judge, not a verdict."
-            color: root.foreground
-            opacity: 0.6
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-
-          Button {
-            text: "Open website"
-            bordered: true
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: Qt.openUrlExternally(root.websiteUrl)
-          }
-        }
+        scout: root
+        foreground: root.foreground
+        accent: root.accent
+        urgent: root.urgent
+        fontFamily: root.fontFamily
+        onCloseRequested: root.close()
+        onWindowRequested: root.openWindow()
       }
     }
   }
