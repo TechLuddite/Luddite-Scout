@@ -52,6 +52,9 @@ Panel {
   property string errorText: ""
   // What is typed in the input field, shared by the panel and the window.
   property string target: ""
+  // "scan" shows the input and a report, "installed" the plugin list.
+  property string mode: "scan"
+  property var installed: []
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.popups.text
   readonly property color accent: Commons.Color.accent
@@ -65,24 +68,56 @@ Panel {
     return /^(https:\/\/)?(www\.)?(github\.com\/)?[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}(\/[A-Za-z0-9._\/-]{0,200})?$/.test(s)
   }
 
+  // Starts bin/scout with the given arguments. One helper process at a
+  // time: a new run stops the one before it.
+  function run(args) {
+    scanProc.running = false
+    root.generation += 1
+    root.reportBuffer = ""
+    root.errorBuffer = ""
+    root.overflowed = false
+    root.errorText = ""
+    root.running = true
+    scanProc.runGeneration = root.generation
+    scanProc.command = ["/usr/bin/timeout", "-k", "5", "240",
+                        "/usr/bin/python3", "-I", "-S", root.pluginDir + "/bin/scout", "--json"].concat(args)
+    scanProc.running = true
+  }
+
   function startScan(text) {
     var target = String(text || "").trim()
     if (!validInput(target)) {
       root.errorText = "Enter a public repository as owner/repo or a github.com URL."
       return
     }
-    scanProc.running = false
-    root.generation += 1
-    root.reportBuffer = ""
-    root.errorBuffer = ""
-    root.overflowed = false
     root.report = null
-    root.errorText = ""
-    root.running = true
-    scanProc.runGeneration = root.generation
-    scanProc.command = ["/usr/bin/timeout", "-k", "5", "240",
-                        "/usr/bin/python3", "-I", "-S", root.pluginDir + "/bin/scout", "--json", "--gh-token", target]
-    scanProc.running = true
+    root.mode = "scan"
+    root.run(["--gh-token", target])
+  }
+
+  // Plugin IDs come from bin/scout's own listing of the plugins folder.
+  // Checked again here so nothing option-shaped reaches the helper's argv.
+  function validId(s) {
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(s)
+  }
+
+  function showInstalled() {
+    root.mode = "installed"
+    root.run(["--installed"])
+  }
+
+  function scanInstalled(id) {
+    if (!validId(String(id))) return
+    root.report = null
+    root.mode = "scan"
+    root.run(["--plugin", String(id)])
+  }
+
+  function compareInstalled(id) {
+    if (!validId(String(id))) return
+    root.report = null
+    root.mode = "scan"
+    root.run(["--gh-token", "--compare", "--plugin", String(id)])
   }
 
   function stopScan() {
@@ -102,6 +137,8 @@ Panel {
     root.reportBuffer = ""
     if (data && typeof data.error === "string") {
       root.errorText = data.error.slice(0, 300)
+    } else if (data && data.installed !== undefined) {
+      root.installed = root.list(data.installed, 500)
     } else if (data && root.list(data.checks, 21).length > 0 && root.list(data.checks, 21).length <= 20) {
       root.report = data
     } else if (code === 124 || code === 137) {

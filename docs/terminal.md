@@ -31,3 +31,13 @@ A token never goes on the command line or into the environment, where other proc
 The readable report shows every finding with its file and line. The JSON report is capped at about 1.5 MB. The lowest-severity findings are dropped first, and the report says when that happened.
 
 `--agent` prints a summary built only from fixed rule IDs and descriptions, severities, statuses, counts, the repository name and the commit hash. See [agent skill](agent-skill.md) for what it guarantees.
+
+## Installed Omarchy plugins
+
+```sh
+bin/scout --installed                 # each plugin, its GitHub source and its commit
+bin/scout --plugin ID                 # scan the installed copy
+bin/scout --plugin ID --compare       # scan the copy and its source, and report the difference
+```
+
+`--compare` reports the installed commit against the source's latest commit, the installed files that differ from the source at the installed commit, and the findings that appear in one report and not the other. S1 is left out of that last list, because a folder on disk has no repository settings. Add `--gh-token` to `--compare` to use the GitHub CLI login, and `--json` to any of the three for JSON.

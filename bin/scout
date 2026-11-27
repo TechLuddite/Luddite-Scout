@@ -13,12 +13,18 @@ Reviews a public GitHub repository with the same checks as the web page
     scout --dir PATH            scan a local checkout instead, with the same
                                 checks except repository settings (S1);
                                 --name owner/repo and --commit SHA label it
+    scout --installed           list the installed Omarchy shell plugins with
+                                the GitHub repository each was cloned from
+    scout --plugin ID           scan the installed copy of one of them
+    scout --plugin ID --compare scan the installed copy and its source, and
+                                report how the two differ
 
 It runs nothing from the scanned repository. It only talks to four fixed
 HTTPS hosts, refuses redirects, caps every response while reading it, and
 stops at an overall deadline.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -1931,6 +1937,26 @@ class LocalContext(Context):
             return {"skipped": "binary"}
         return {"text": body.decode("utf-8", "replace")}
 
+    def read_blob(self, path, max_bytes=LOCKFILE_MAX_BYTES):
+        """The bytes git would store for path: file contents, or a link's target."""
+        mode = self._kinds.get(path)
+        parent, _, leaf = path.rpartition("/")
+        try:
+            dfd = self._open_dir(parent)
+            try:
+                if mode == "120000":
+                    return os.readlink(leaf, dir_fd=dfd).encode("utf-8", "surrogateescape")
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+            finally:
+                os.close(dfd)
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    return None
+                body = fh.read(max_bytes + 1)
+        except OSError:
+            return None
+        return body if len(body) <= max_bytes else None
+
     def fetch_text(self, path, max_bytes=RAW_MAX_BYTES):
         key = (path, max_bytes)
         with self._lock:
@@ -2078,6 +2104,206 @@ def bounded_json(report):
         longest["findings"] = longest["findings"][:keep]
         out = json_safe(json.dumps(report, ensure_ascii=False))
     return out
+
+
+# ---------------------------------------------------------- installed plugins
+
+# Omarchy shell plugins live in one folder each under the user's config
+# directory. Everything read from them is untrusted: the manifest, the git
+# metadata and the files. Nothing is run, git included. The .git folder is
+# read as plain files to learn the origin URL and the checked-out commit.
+PLUGIN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+GITHUB_REMOTE = re.compile(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?$")
+GENERATED = re.compile(r"(^|/)__pycache__/|\.pyc$")
+COMPARE_MAX_PATHS = 50
+COMPARE_MAX_FINDINGS = 100
+
+
+def plugins_dir():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "omarchy", "plugins")
+
+
+def _read_small(path, cap=200_000):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
+            return fh.read(cap).decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def git_info(root):
+    """{"source": "owner/repo" or None, "commit": sha or None}, read from .git as files."""
+    out = {"source": None, "commit": None}
+    git = os.path.join(root, ".git")
+    if os.path.islink(git) or not os.path.isdir(git):
+        return out
+    config = _read_small(os.path.join(git, "config")) or ""
+    m = re.search(r'^\[remote "origin"\]\s*\n((?:[ \t]+[^\n]*\n?)*)', config, re.M)
+    url = re.search(r"^[ \t]*url[ \t]*=[ \t]*(\S+)[ \t]*$", m.group(1), re.M) if m else None
+    remote = GITHUB_REMOTE.match(url.group(1)) if url else None
+    if remote:
+        out["source"] = f"{remote.group(1)}/{remote.group(2)}"
+    head = (_read_small(os.path.join(git, "HEAD"), 400) or "").strip()
+    ref = re.fullmatch(r"ref: (refs/heads/[A-Za-z0-9._/-]{1,200})", head)
+    if ref and ".." not in ref.group(1):
+        sha = (_read_small(os.path.join(git, *ref.group(1).split("/")), 100) or "").strip()
+        if not SHA40.match(sha):
+            packed = _read_small(os.path.join(git, "packed-refs"), 2_000_000) or ""
+            hit = re.search(r"^([0-9a-f]{40}) " + re.escape(ref.group(1)) + r"$", packed, re.M)
+            sha = hit.group(1) if hit else ""
+    else:
+        sha = head
+    if SHA40.match(sha):
+        out["commit"] = sha
+    return out
+
+
+def plugin_info(pid):
+    if not PLUGIN_ID.match(pid):
+        raise ValueError("That is not a plugin ID.")
+    path = os.path.join(plugins_dir(), pid)
+    if not os.path.isdir(path):
+        raise ScanError("That plugin is not installed.")
+    linked = os.path.islink(path)
+    root = os.path.realpath(path)
+    name = version = ""
+    try:
+        manifest = json.loads(_read_small(os.path.join(root, "manifest.json")) or "")
+        if isinstance(manifest, dict):
+            name = truncate(manifest.get("name") or "", 100) if isinstance(manifest.get("name"), str) else ""
+            version = truncate(manifest.get("version") or "", 40) if isinstance(manifest.get("version"), str) else ""
+    except ValueError:
+        pass
+    return {"id": pid, "name": name, "version": version, "linked": linked, "root": root, **git_info(root)}
+
+
+def list_installed():
+    try:
+        names = sorted(os.listdir(plugins_dir()))
+    except OSError:
+        names = []
+    rows = []
+    for n in names[:500]:
+        if not PLUGIN_ID.match(n):
+            continue  # also leaves out dot-prefixed backup folders
+        try:
+            info = plugin_info(n)
+        except (ScanError, ValueError):
+            continue
+        rows.append({k: v for k, v in info.items() if k != "root"})
+    return {"tool": "luddite-scout", "version": VERSION, "installed": rows}
+
+
+def scan_plugin(pid):
+    info = plugin_info(pid)
+    report = scan_dir(info["root"], info["source"] or pid, info["commit"])
+    report["plugin"] = {k: v for k, v in info.items() if k != "root"}
+    return report
+
+
+def git_blob_sha(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def compare_files(ctx, tree):
+    """Installed files against the source tree at the installed commit."""
+    remote = {e["path"]: e.get("sha") for e in tree.get("tree", []) if isinstance(e, dict) and e.get("type") == "blob" and isinstance(e.get("path"), str)}
+    changed, added, checked, generated = [], [], 0, 0
+    local = set()
+    for e in ctx.entries:
+        if e["type"] != "blob":
+            continue
+        path = e["path"]
+        if GENERATED.search(path):
+            generated += 1
+            continue
+        local.add(path)
+        if path not in remote:
+            added.append(path)
+            continue
+        checked += 1
+        data = ctx.read_blob(path)
+        if data is None or git_blob_sha(data) != remote[path]:
+            changed.append(path)
+    missing = sorted(p for p in remote if p not in local)
+    cut = lambda rows: [truncate(p, 300) for p in rows[:COMPARE_MAX_PATHS]]
+    return {"checked": checked, "generated": generated,
+            "changed": cut(changed), "changedCount": len(changed),
+            "added": cut(added), "addedCount": len(added),
+            "missing": cut(missing), "missingCount": len(missing),
+            "truncated": bool(tree.get("truncated")) or ctx.truncated}
+
+
+def _finding_keys(report):
+    out = {}
+    for c in report["checks"]:
+        for f in c["findings"]:
+            out.setdefault((f.get("rule"), f.get("path"), f.get("title")), {"check": c["id"], "severity": f["severity"], "rule": f.get("rule"), "title": f["title"], "path": f.get("path"), "line": f.get("line")})
+    return out
+
+
+def diff_findings(installed, source):
+    """Findings in one report and not the other. S1 is left out: it reads
+    repository settings, which a folder on disk does not have."""
+    a, b = _finding_keys(installed), _finding_keys(source)
+    rank = lambda f: -RANK[f["severity"]]
+    only_a = sorted((v for k, v in a.items() if k not in b and v["check"] != "S1"), key=rank)
+    only_b = sorted((v for k, v in b.items() if k not in a and v["check"] != "S1"), key=rank)
+    return {"onlyInstalled": only_a[:COMPARE_MAX_FINDINGS], "onlyInstalledCount": len(only_a),
+            "onlySource": only_b[:COMPARE_MAX_FINDINGS], "onlySourceCount": len(only_b)}
+
+
+def compare_plugin(pid, token=None):
+    info = plugin_info(pid)
+    if not info["source"]:
+        raise ScanError("This plugin has no GitHub origin recorded, so there is nothing to compare it with.")
+    installed = scan_dir(info["root"], info["source"], info["commit"])
+    source = scan(info["source"], token)
+    files = None
+    if info["commit"]:
+        net = Net(token)
+        owner, repo = info["source"].split("/")
+        tree = net.api(f"/repos/{owner}/{repo}/git/trees/{info['commit']}?recursive=1")
+        if tree:
+            files = compare_files(LocalContext(info["root"], Net(None), info["source"], info["commit"]), tree)
+    return {
+        "tool": "luddite-scout", "version": VERSION,
+        "plugin": {k: v for k, v in info.items() if k != "root"},
+        "repository": source["repository"], "commit": source["commit"], "api": source["api"],
+        "compare": {"installedCommit": info["commit"], "sourceCommit": source["commit"],
+                    "sameCommit": bool(info["commit"]) and info["commit"] == source["commit"],
+                    "commitInSource": files is not None, "files": files, **diff_findings(installed, source)},
+        "checks": source["checks"], "installedChecks": installed["checks"],
+    }
+
+
+def format_installed(listing):
+    lines = []
+    for r in listing["installed"]:
+        lines.append("  ".join([r["id"], r["source"] or "(no GitHub origin)", (r["commit"] or "")[:12], "linked" if r["linked"] else ""]).rstrip())
+    return term_safe("\n".join(lines) or "No plugins are installed.").replace("⟦U+000A⟧", "\n")
+
+
+def format_compare(result):
+    c = result["compare"]
+    lines = [f"{result['plugin']['id']}  from  {result['repository']}",
+             f"Installed commit: {c['installedCommit'] or 'unknown'}",
+             f"Source commit:    {c['sourceCommit']}" + ("  (same)" if c["sameCommit"] else "")]
+    f = c["files"]
+    if f is None:
+        lines.append("Files: not compared. The installed commit is unknown or is not in the source repository.")
+    else:
+        lines.append(f"Files against the source at the installed commit: {f['checked']} checked, {f['changedCount']} changed, {f['addedCount']} added, {f['missingCount']} missing.")
+        for label, key in (("changed", "changed"), ("added", "added"), ("missing", "missing")):
+            lines += [f"  {label}: {p}" for p in f[key]]
+    for label, key in (("Findings only in the installed copy", "onlyInstalled"), ("Findings only in the source", "onlySource")):
+        lines.append(f"{label}: {c[key + 'Count']}")
+        lines += [f"  [{x['severity']}] {x['title']}" + (f"  {x['path']}" if x.get("path") else "") for x in c[key]]
+    return "\n".join(term_safe(l) for l in lines)
 
 
 # --agent output is for a coding agent that must not read text the scanned
@@ -2351,7 +2577,34 @@ def gh_token():
     return token if TOKEN.fullmatch(token) else None
 
 
-VALUED = ("--name", "--commit")
+VALUED = ("--name", "--commit", "--plugin")
+
+
+def installed_main(flags, values):
+    """--installed, --plugin ID and --plugin ID --compare."""
+    as_json = "--json" in flags
+    try:
+        if "--installed" in flags:
+            out = list_installed()
+            text = format_installed
+        elif "--compare" in flags:
+            out = compare_plugin(values["--plugin"], gh_token() if "--gh-token" in flags else None)
+            text = format_compare
+        else:
+            out = scan_plugin(values["--plugin"])
+            text = format_text
+    except ValueError as e:
+        msg, code = str(e), 2
+    except ScanError as e:
+        msg, code = str(e), 1
+    else:
+        print(bounded_json(out) if as_json else text(out))
+        return 0
+    if as_json:
+        print(json.dumps({"tool": "luddite-scout", "version": VERSION, "error": msg}))
+    else:
+        print(term_safe(msg), file=sys.stderr)
+    return code
 
 
 def main(argv):
@@ -2366,6 +2619,13 @@ def main(argv):
             del argv[i:i + 2]
     args = [a for a in argv if not a.startswith("--")]
     flags = {a for a in argv if a.startswith("--")}
+    if "--installed" in flags or "--plugin" in values:
+        allowed = {"--json", "--installed"} if "--installed" in flags else {"--json", "--compare", "--gh-token"}
+        if args or flags - allowed or ("--installed" in flags and values) or set(values) - {"--plugin"} \
+                or ("--gh-token" in flags and "--compare" not in flags):
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
+        return installed_main(flags, values)
     unknown = flags - {"--json", "--agent", "--token-stdin", "--gh-token", "--help", "--version", "--dir"}
     if "--dir" not in flags and values:
         unknown = unknown | set(values)
