@@ -9,7 +9,7 @@
 
 ## Network access
 
-All front ends contact the same four hosts and no others:
+All front ends contact the same four hosts. `bin/scout` contacts a fifth, and only for `--aur` and the plugin's Recipe button. No other host is contacted:
 
 | Host | What it receives |
 | --- | --- |
@@ -17,5 +17,6 @@ All front ends contact the same four hosts and no others:
 | `raw.githubusercontent.com` | Requests for file contents |
 | `api.osv.dev` | Package names and versions from lockfiles |
 | `api.securityscorecards.dev` | The repository name |
+| `aur.archlinux.org` | The name of the one AUR package whose build recipe you asked to read |
 
 Those services see your IP address and what you looked up. The website's Content Security Policy and `bin/scout`'s host allowlist block every other host, and `bin/scout` refuses redirects. Results are not stored or shareable by link. See [about.html](../about.html) for the full statement.

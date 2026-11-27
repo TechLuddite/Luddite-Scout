@@ -31,7 +31,9 @@ The puzzle button in the title row lists two things. The first is the Omarchy sh
 
 A plugin with no GitHub origin, such as one linked in from a system package, has the Installed button only.
 
-The second is the pacman packages you installed by name whose home page is a GitHub repository, with a Source button that scans that repository. Packages that no pacman repository carries, such as AUR and local builds, come first and are tinted. A package's files are not scanned or compared, because an installed package is a build and not a copy of its source. The list is read from the plain-text files under `/var/lib/pacman`, and pacman is not run. The list is read by `bin/scout --installed`, which reads the manifest and the `.git` folder of each plugin as plain files and does not run git.
+The second is the pacman packages you installed by name whose home page is a GitHub repository, with a Source button that scans that repository. Packages that no pacman repository carries, such as AUR and local builds, come first and are tinted. A package from outside the pacman repositories is listed even without a GitHub home page, and has a Recipe button. It reads the package's AUR build recipe and install script as text and reports what they download and run: sources without checksums, repository checkouts with no commit, downloads inside build functions, `sudo`, and what the install script does as root. The recipe is what runs on your machine at build and install time. A foreign package that is a local build has no AUR recipe, and the report says so.
+
+A package's files are not scanned or compared, because an installed package is a build and not a copy of its source. The list is read from the plain-text files under `/var/lib/pacman`, and pacman is not run. The list is read by `bin/scout --installed`, which reads the manifest and the `.git` folder of each plugin as plain files and does not run git.
 
 The panel shows up to eight findings per check. The website or the terminal shows the rest. Open website, at the bottom of the panel, opens https://techluddite.github.io/Luddite-Scout/ in your browser.
 
@@ -43,7 +45,7 @@ If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that lo
 - For the installed list it reads `~/.config/omarchy/plugins` and the package database under `/var/lib/pacman`. A plugin ID is checked against a fixed pattern before it reaches the helper, and the helper builds the folder path itself.
 - It reads at most about 2 MB of the scan's output and renders all of it as plain text.
 - It writes no files and keeps no state, cache, credentials or configuration.
-- It contacts the four hosts listed in [data handling](data-handling.md), through `bin/scout` only.
+- It contacts the hosts listed in [data handling](data-handling.md), through `bin/scout` only. `aur.archlinux.org` is contacted only when you press Recipe.
 
 ## Remove
 
