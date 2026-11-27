@@ -20,8 +20,10 @@ Reviews a public GitHub repository with the same checks as the web page
     scout --plugin ID           scan the installed copy of one of them
     scout --plugin ID --compare scan the installed copy and its source, and
                                 report how the two differ
+    scout --aur NAME            read the AUR build recipe of a package and
+                                report what it downloads and runs
 
-It runs nothing from the scanned repository. It only talks to four fixed
+It runs nothing from the scanned repository. It only talks to five fixed
 HTTPS hosts, refuses redirects, caps every response while reading it, and
 stops at an overall deadline.
 """
@@ -42,7 +44,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 VERSION = "0.4.0"
-ALLOWED_HOSTS = {"api.github.com", "raw.githubusercontent.com", "api.osv.dev", "api.securityscorecards.dev"}
+ALLOWED_HOSTS = {"api.github.com", "raw.githubusercontent.com", "api.osv.dev", "api.securityscorecards.dev", "aur.archlinux.org"}
 DEADLINE_SECONDS = 180
 API_MAX_BYTES = 8_000_000
 RAW_MAX_BYTES = 1_000_000
@@ -2144,7 +2146,8 @@ def json_safe(out):
 
 
 def format_text(report):
-    out = [f"{report['repository']} at {report['commit'] or 'a local checkout'}"]
+    aur = str(report["repository"]).startswith("aur/")
+    out = [f"{report['repository']} at {report['commit'] or ('the Arch User Repository' if aur else 'a local checkout')}"]
     for c in report["checks"]:
         counts = {}
         for f in c["findings"]:
@@ -2162,7 +2165,7 @@ def format_text(report):
     api = report["api"]
     out.append("")
     if api.get("local"):
-        out.append("Local scan: no GitHub API calls.")
+        out.append("Read from aur.archlinux.org: no GitHub API calls." if aur else "Local scan: no GitHub API calls.")
     else:
         who = "signed in" if api.get("authenticated") else "anonymous"
         out.append(f"GitHub API ({who}): {api['calls']} requests used, {api['remaining']} of {api['limit']} left this hour.")
@@ -2347,10 +2350,11 @@ def list_packages(local_dir=None, sync_dir=None):
         if not PACKAGE_NAME.match(name) or fields.get("REASON") == "1":
             continue
         m = GITHUB_URL.match(fields.get("URL", ""))
-        if not m:
+        foreign = None if known is None else name not in known
+        if not m and not foreign:
             continue
-        rows.append({"name": name, "version": truncate(fields.get("VERSION", ""), 60), "source": f"{m.group(1)}/{m.group(2)}",
-                     "repo": None if known is None else known.get(name, ""), "foreign": None if known is None else name not in known})
+        rows.append({"name": name, "version": truncate(fields.get("VERSION", ""), 60), "source": f"{m.group(1)}/{m.group(2)}" if m else None,
+                     "repo": None if known is None else known.get(name, ""), "foreign": foreign})
     rows.sort(key=lambda r: (r["foreign"] is not True, r["name"]))
     return rows[:PACKAGES_MAX]
 
@@ -2446,7 +2450,7 @@ def format_installed(listing):
         lines += ["", "Packages installed by name whose home page is a GitHub repository:"]
         for r in listing["packages"]:
             origin = "foreign (AUR or local build)" if r["foreign"] else (r["repo"] or "")
-            lines.append("  ".join([r["name"], r["version"], r["source"], origin]).rstrip())
+            lines.append("  ".join([r["name"], r["version"], r["source"] or "(no GitHub home page)", origin]).rstrip())
     return term_safe("\n".join(lines) or "No plugins are installed.").replace("⟦U+000A⟧", "\n")
 
 
@@ -2466,6 +2470,190 @@ def format_compare(result):
         lines.append(f"{label}: {c[key + 'Count']}")
         lines += [f"  [{x['severity']}] {x['title']}" + (f"  {x['path']}" if x.get("path") else "") for x in c[key]]
     return "\n".join(term_safe(l) for l in lines)
+
+
+# ------------------------------------------------------------- AUR recipes
+
+# An AUR package is a PKGBUILD: a shell script that makepkg runs on the
+# user's machine, plus an optional install script that pacman runs as root.
+# The recipe is read as text and never run or sourced.
+AUR_MAX_BYTES = 400_000
+AUR_VCS = re.compile(r"^(?:[\w.+-]+::)?(?:git|svn|hg|bzr|fossil)(?:\+|://)", re.A)
+AUR_PINNED = re.compile(r"#(?:commit|tag|revision)=", re.A)
+AUR_SUMS = ("b2sums", "sha512sums", "sha384sums", "sha256sums", "sha224sums", "sha1sums", "md5sums", "cksums")
+AUR_WEAK = {"sha1sums", "md5sums", "cksums"}
+AUR_FETCH = re.compile(r"(?:^|[\s;&|(`$])(curl|wget|aria2c|git\s+clone|git\s+submodule\s+update|pip3?\s+install|npm\s+(?:install|ci|i)\b|pnpm\s+install|yarn\s+(?:install|add)|cargo\s+install|go\s+(?:get|install)|gem\s+install|bun\s+install)\b", re.A)
+AUR_PIPE_SHELL = re.compile(r"(?:curl|wget)[^\n|]{0,200}\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b|\b(?:ba|z)?sh\s+<\(\s*(?:curl|wget)", re.A)
+AUR_SUDO = re.compile(r"(?:^|[\s;&|(`$])(?:sudo|pkexec|doas|su\s+-c)\s", re.A)
+AUR_SETUID = re.compile(r"\bchmod\s+(?:-\w+\s+)*(?:[ugoa]*\+[rwx]*s|[2467][0-7]{3})\b|\bsetcap\b", re.A)
+AUR_ENCODED = re.compile(r"base64\s+(?:-d|--decode)|\beval\s+[\"'$`(]|\bxxd\s+-r\b", re.A)
+AUR_BINARY_SOURCE = re.compile(r"\.(?:deb|rpm|AppImage|appimage|exe|msi|dmg|pkg\.tar\.[a-z]+|snap|flatpak)(?:[?#\"']|$)|/releases/download/", re.A)
+AUR_INSTALL_HOOKS = ("pre_install", "post_install", "pre_upgrade", "post_upgrade", "pre_remove", "post_remove")
+AUR_SERVICE = re.compile(r"\bsystemctl\s+(?:--\S+\s+)*(?:enable|start|restart|daemon-reload|mask)\b|\buseradd\b|\bgroupadd\b|\busermod\b", re.A)
+
+
+def _pkgbuild_code(text):
+    """The recipe without comments and here-documents left as they are. Good
+    enough for pattern matches: a # inside a quoted string is rare in recipes."""
+    return "\n".join(re.sub(r"(^|\s)#.*$", r"\1", line) for line in text.split("\n"))
+
+
+def _pkgbuild_arrays(code):
+    """{name: [values]} for name=(...) assignments, with per-architecture
+    names such as source_x86_64 folded into their base name."""
+    out = {}
+    for m in re.finditer(r"^[ \t]*([a-z0-9]+sums|source|install|noextract|validpgpkeys)(?:_[a-z0-9_]+)?\+?=\(([^)]*)\)", code, re.M | re.A):
+        values = re.findall(r"\"([^\"]*)\"|'([^']*)'|([^\s\"']+)", m.group(2))
+        out.setdefault(m.group(1), []).extend(a or b or c for a, b, c in values)
+    return out
+
+
+def _pkgbuild_scalar(code, name):
+    m = re.search(r"^[ \t]*" + name + r"=[\"']?([^\"'\s#]*)", code, re.M | re.A)
+    return m.group(1) if m else ""
+
+
+def _line_hits(rx, text, cap=10):
+    out = []
+    for i, line in enumerate(text.split("\n")):
+        if rx.search(line):
+            out.append({"line": i + 1, "text": truncate(line.strip(), 200)})
+    return out[:cap], len(out)
+
+
+def analyze_pkgbuild(text):
+    code = _pkgbuild_code(text)
+    arrays = _pkgbuild_arrays(code)
+    findings = []
+    sources = arrays.get("source", [])
+    urls = [s.split("::", 1)[-1] for s in sources]
+    vcs = [s for s in sources if AUR_VCS.match(s)]
+    plain = [s for s in sources if not AUR_VCS.match(s)]
+    sums = {k: v for k, v in arrays.items() if k in AUR_SUMS}
+
+    if plain and not sums:
+        findings.append({"severity": "high", "rule": "S10.no-checksums", "title": "Sources have no checksums, so makepkg cannot tell a changed download from the intended one"})
+    elif sums:
+        best = [k for k in AUR_SUMS if k in sums][0]
+        skipped = sum(1 for v in sums[best] if v == "SKIP")
+        unexplained = max(0, skipped - len(vcs))
+        if unexplained:
+            findings.append({"severity": "medium", "rule": "S10.skip-checksum", "count": unexplained,
+                             "title": f"{unexplained} downloaded source{'s have' if unexplained > 1 else ' has'} its checksum set to SKIP"})
+        if set(sums) <= AUR_WEAK:
+            findings.append({"severity": "low", "rule": "S10.weak-checksum", "title": "Checksums use only MD5, SHA-1 or CRC, which do not resist a deliberate swap"})
+    unpinned = [s for s in vcs if not AUR_PINNED.search(s)]
+    if unpinned:
+        findings.append({"severity": "medium", "rule": "S10.unpinned-vcs", "count": len(unpinned),
+                         "title": f"{len(unpinned)} source{'s are' if len(unpinned) > 1 else ' is'} a repository checkout with no commit or tag, so each build takes whatever is newest",
+                         "samples": [{"text": truncate(s, 200)} for s in unpinned[:10]]})
+    insecure = [u for u in urls if re.match(r"^(?:http|ftp)://", u)]
+    if insecure:
+        findings.append({"severity": "medium", "rule": "S10.insecure-source", "count": len(insecure), "title": "Downloads a source over http or ftp",
+                         "samples": [{"text": truncate(u, 200)} for u in insecure[:10]]})
+    binary = [u for u in urls if AUR_BINARY_SOURCE.search(u)]
+    if binary or _pkgbuild_scalar(code, "pkgname").endswith("-bin"):
+        findings.append({"severity": "low", "rule": "S10.prebuilt-binary", "title": "Repackages a prebuilt binary, so scanning the upstream source does not cover what gets installed",
+                         "samples": [{"text": truncate(u, 200)} for u in binary[:10]]})
+
+    for rx, sev, rule, title in (
+        (AUR_PIPE_SHELL, "high", "S10.download-to-shell", "Pipes a download into a shell"),
+        (AUR_SUDO, "high", "S10.sudo", "Uses sudo, pkexec, doas or su during the build"),
+        (AUR_SETUID, "medium", "S10.setuid", "Sets setuid or setgid bits, or file capabilities"),
+        (AUR_ENCODED, "medium", "S10.encoded-or-eval", "Decodes base64 or evaluates a string, which can hide what runs"),
+        (AUR_FETCH, "medium", "S10.fetch-in-build", "Downloads or installs code from inside a build function, outside the checksummed sources"),
+    ):
+        hits, n = _line_hits(rx, code)
+        if hits:
+            findings.append({"severity": sev, "rule": rule, "title": title, "line": hits[0]["line"], "count": n, "samples": hits})
+
+    hosts = sorted({urllib.parse.urlsplit(re.sub(r"^(?:git|svn|hg|bzr|fossil)\+", "", u)).hostname or "" for u in urls if "://" in u} - {""})
+    if hosts:
+        findings.append({"severity": "info", "rule": "S10.source-hosts", "title": f"Downloads sources from {len(hosts)} host{'s' if len(hosts) > 1 else ''}",
+                         "samples": [{"text": truncate(h, 120)} for h in hosts[:20]]})
+    install = _pkgbuild_scalar(code, "install")
+    return findings, install
+
+
+def analyze_install_script(text):
+    code = _pkgbuild_code(text)
+    hooks = [h for h in AUR_INSTALL_HOOKS if re.search(r"^[ \t]*(?:function\s+)?" + h + r"\s*\(\s*\)", code, re.M | re.A)]
+    findings = [{"severity": "medium", "rule": "S10.install-script",
+                 "title": "Has an install script, which pacman runs as root" + (": " + ", ".join(hooks) if hooks else "")}]
+    for rx, sev, rule, title in (
+        (AUR_PIPE_SHELL, "high", "S10.download-to-shell", "Pipes a download into a shell"),
+        (AUR_FETCH, "high", "S10.install-script-fetch", "The install script downloads or installs code as root"),
+        (AUR_SETUID, "medium", "S10.setuid", "Sets setuid or setgid bits, or file capabilities"),
+        (AUR_ENCODED, "medium", "S10.encoded-or-eval", "Decodes base64 or evaluates a string, which can hide what runs"),
+        (AUR_SERVICE, "low", "S10.install-script-services", "The install script changes system services, users or groups"),
+    ):
+        hits, n = _line_hits(rx, code)
+        if hits:
+            findings.append({"severity": sev, "rule": rule, "title": title, "line": hits[0]["line"], "count": n, "samples": hits})
+    return findings
+
+
+def scan_aur(name):
+    if not PACKAGE_NAME.match(name):
+        raise ValueError("That is not a package name.")
+    net = Net(None)
+    quoted = urllib.parse.quote(name, safe="")
+
+    def plain(path):
+        status, _, body = net._request(f"https://aur.archlinux.org/cgit/aur.git/plain/{urllib.parse.quote(path, safe='')}?h={quoted}", AUR_MAX_BYTES)
+        if status == 404:
+            return None
+        if status != 200:
+            raise ScanError(f"The AUR returned {status}.")
+        return body.decode("utf-8", "replace")
+
+    status, info = net.get_json(f"https://aur.archlinux.org/rpc/v5/info?arg%5B%5D={quoted}", AUR_MAX_BYTES)
+    meta = (info or {}).get("results") or []
+    meta = meta[0] if meta and isinstance(meta[0], dict) else None
+    base = meta.get("PackageBase") if meta else name
+    if not isinstance(base, str) or not PACKAGE_NAME.match(base):
+        base = name
+    quoted = urllib.parse.quote(base, safe="")
+    recipe = plain("PKGBUILD")
+    if recipe is None:
+        raise NotFoundError("The AUR has no package by that name. A foreign package can also be a local build.")
+    findings, install = analyze_pkgbuild(recipe)
+    findings = [{**f, "path": "PKGBUILD"} for f in findings]
+    notes = ["Read the PKGBUILD as text. Nothing in it was run."]
+    if install:
+        if re.fullmatch(r"[A-Za-z0-9@._+-]{1,120}", install) or "$" in install:
+            path = install if "$" not in install else f"{base}.install"
+            script = plain(path)
+            if script is None:
+                findings.append({"severity": "medium", "rule": "S10.install-script", "title": "Names an install script that could not be read. Review it by hand.", "path": "PKGBUILD"})
+            else:
+                findings += [{**f, "path": path} for f in analyze_install_script(script)]
+        else:
+            findings.append({"severity": "medium", "rule": "S10.install-script", "title": "Names an install script with an unusual path. Review it by hand.", "path": "PKGBUILD"})
+    facts = []
+    if meta:
+        day = lambda t: time.strftime("%Y-%m-%d", time.gmtime(t)) if isinstance(t, (int, float)) else "unknown"
+        maintainer = meta.get("Maintainer")
+        facts = [["Version", truncate(meta.get("Version") or "", 60)],
+                 ["Maintainer", truncate(maintainer, 60) if isinstance(maintainer, str) else "none (orphaned)"],
+                 ["First submitted", day(meta.get("FirstSubmitted"))], ["Last modified", day(meta.get("LastModified"))],
+                 ["Votes", str(int(meta.get("NumVotes") or 0))]]
+        if not isinstance(maintainer, str):
+            findings.append({"severity": "medium", "rule": "S10.orphaned", "title": "The package has no maintainer, so anyone may adopt it and change the recipe"})
+        if meta.get("OutOfDate"):
+            findings.append({"severity": "low", "rule": "S10.out-of-date", "title": f"Flagged out of date since {day(meta.get('OutOfDate'))}"})
+        last = meta.get("LastModified")
+        if isinstance(last, (int, float)) and time.time() - last < 14 * 86400:
+            findings.append({"severity": "low", "rule": "S10.recently-changed", "title": f"The recipe changed on {day(last)}, within the last 14 days"})
+        url = GITHUB_URL.match(meta.get("URL") or "")
+        if url:
+            facts.append(["Upstream", f"{url.group(1)}/{url.group(2)}"])
+    else:
+        notes.append("The AUR metadata could not be read, so maintainer and dates are missing.")
+    check = _bound_result({"status": "ran" if meta else "partial", "notes": notes, "findings": findings})
+    return {"tool": "luddite-scout", "version": VERSION, "repository": f"aur/{base}", "commit": None,
+            "api": {"calls": net.calls, "remaining": None, "limit": None, "authenticated": False, "tokenRejected": False, "local": True},
+            "checks": [{"id": "S10", "name": "AUR build recipe", **check, "facts": facts}]}
 
 
 # --agent output is for a coding agent that must not read text the scanned
@@ -2587,6 +2775,24 @@ RULES = {
     "S9.install-telemetry": "Manifest lists a package that reports each install to its maintainer",
     "S9.machine-id": "Code reads an identifier of the machine",
     "S9.telemetry-setting": "Text names a telemetry setting",
+    "S10.no-checksums": "Recipe sources have no checksums",
+    "S10.skip-checksum": "Recipe skips the checksum of a downloaded source",
+    "S10.weak-checksum": "Recipe uses only weak checksums",
+    "S10.unpinned-vcs": "Recipe checks out a repository with no commit or tag",
+    "S10.insecure-source": "Recipe downloads a source over http or ftp",
+    "S10.prebuilt-binary": "Recipe repackages a prebuilt binary",
+    "S10.download-to-shell": "Recipe pipes a download into a shell",
+    "S10.sudo": "Recipe uses sudo or a similar tool",
+    "S10.setuid": "Recipe sets setuid bits or file capabilities",
+    "S10.encoded-or-eval": "Recipe decodes base64 or evaluates a string",
+    "S10.fetch-in-build": "Recipe downloads or installs code inside a build function",
+    "S10.source-hosts": "Hosts the recipe downloads sources from",
+    "S10.install-script": "Package has an install script that pacman runs as root",
+    "S10.install-script-fetch": "Install script downloads or installs code as root",
+    "S10.install-script-services": "Install script changes services, users or groups",
+    "S10.orphaned": "AUR package has no maintainer",
+    "S10.out-of-date": "AUR package is flagged out of date",
+    "S10.recently-changed": "AUR recipe changed in the last 14 days",
     "unclassified": "Finding without a rule ID. Read the full report.",
 }
 STATUSES = {"ran", "partial", "skipped", "not-applicable"}
@@ -2744,14 +2950,17 @@ def gh_token():
     return token if TOKEN.fullmatch(token) else None
 
 
-VALUED = ("--name", "--commit", "--plugin")
+VALUED = ("--name", "--commit", "--plugin", "--aur")
 
 
 def installed_main(flags, values):
     """--installed, --plugin ID and --plugin ID --compare."""
     as_json = "--json" in flags
     try:
-        if "--installed" in flags:
+        if "--aur" in values:
+            out = scan_aur(values["--aur"])
+            text = format_text
+        elif "--installed" in flags:
             out = list_installed()
             text = format_installed
         elif "--compare" in flags:
@@ -2786,6 +2995,11 @@ def main(argv):
             del argv[i:i + 2]
     args = [a for a in argv if not a.startswith("--")]
     flags = {a for a in argv if a.startswith("--")}
+    if "--aur" in values:
+        if args or flags - {"--json"} or set(values) - {"--aur"}:
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
+        return installed_main(flags, values)
     if "--installed" in flags or "--plugin" in values:
         allowed = {"--json", "--installed"} if "--installed" in flags else {"--json", "--compare", "--gh-token"}
         if args or flags - allowed or ("--installed" in flags and values) or set(values) - {"--plugin"} \

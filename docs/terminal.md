@@ -41,3 +41,11 @@ bin/scout --plugin ID --compare       # scan the copy and its source, and report
 ```
 
 `--compare` reports the installed commit against the source's latest commit, the installed files that differ from the source at the installed commit, and the findings that appear in one report and not the other. S1 is left out of that last list, because a folder on disk has no repository settings. Add `--gh-token` to `--compare` to use the GitHub CLI login, and `--json` to any of the three for JSON.
+
+## AUR build recipes
+
+```sh
+bin/scout --aur NAME      # read the PKGBUILD and install script of an AUR package
+```
+
+The recipe is fetched from `aur.archlinux.org` and read as text. Nothing in it is run or sourced. The report is one check, S10, with the package's maintainer, dates and votes as facts. Findings cover sources with no checksum or a skipped one, repository checkouts with no commit or tag, sources over http, prebuilt binaries, downloads and package installs inside build functions, a download piped into a shell, `sudo`, setuid bits, encoded or evaluated strings, and an install script and what it does as root. An orphaned package, an out-of-date flag and a recipe changed in the last 14 days are reported too.

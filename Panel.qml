@@ -114,6 +114,18 @@ Panel {
     root.run(["--plugin", String(id)])
   }
 
+  // Package names come from bin/scout's listing of the pacman database.
+  function validPackage(s) {
+    return /^[a-z0-9@._+][a-z0-9@._+-]{0,127}$/.test(s)
+  }
+
+  function scanRecipe(name) {
+    if (!validPackage(String(name))) return
+    root.report = null
+    root.mode = "scan"
+    root.run(["--aur", String(name)])
+  }
+
   function compareInstalled(id) {
     if (!validId(String(id))) return
     root.report = null

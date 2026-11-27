@@ -134,9 +134,9 @@ class Installed(unittest.TestCase):
                 tar.addfile(info)
         rows = scout.list_packages(str(local), str(sync))
         self.assertEqual([(r["name"], r["source"], r["foreign"], r["repo"]) for r in rows],
-                         [("aur-tool", "someone/aur-tool", True, ""), ("bat", "sharkdp/bat", False, "extra")])
+                         [("aur-tool", "someone/aur-tool", True, ""), ("odd", None, True, ""), ("bat", "sharkdp/bat", False, "extra")])
         rows = scout.list_packages(str(local), str(pathlib.Path(self.tmp.name) / "missing"))
-        self.assertEqual([r["foreign"] for r in rows], [None, None])
+        self.assertEqual([(r["name"], r["foreign"]) for r in rows], [("aur-tool", None), ("bat", None)])
 
     def test_command_line(self):
         self.assertEqual(scout.main(["--installed", "extra"]), 2)

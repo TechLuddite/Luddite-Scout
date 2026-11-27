@@ -320,7 +320,7 @@ ColumnLayout {
       PanelSectionHeader {
         Layout.topMargin: Style.spacing.lg
         visible: view.scout.packages.length > 0
-        text: "PACKAGES WITH A GITHUB SOURCE"
+        text: "PACKAGES"
         foreground: view.foreground
         fontFamily: view.fontFamily
       }
@@ -328,7 +328,7 @@ ColumnLayout {
       Plain {
         Layout.fillWidth: true
         visible: view.scout.packages.length > 0
-        text: "Packages you installed by name whose home page is a GitHub repository. Packages from outside the pacman repositories, such as AUR builds, come first."
+        text: "Packages you installed by name that come from outside the pacman repositories, such as AUR builds, then those whose home page is a GitHub repository."
         color: view.foreground
         opacity: 0.6
         font.family: view.fontFamily
@@ -352,7 +352,7 @@ ColumnLayout {
           var out = []
           var rows = view.scout.packages
           for (var i = 0; i < rows.length && out.length < 200; i++) {
-            if (q === "" || String(rows[i].name).toLowerCase().indexOf(q) !== -1 || String(rows[i].source).toLowerCase().indexOf(q) !== -1)
+            if (q === "" || String(rows[i].name).toLowerCase().indexOf(q) !== -1 || String(rows[i].source || "").toLowerCase().indexOf(q) !== -1)
               out.push(rows[i])
           }
           return out
@@ -361,7 +361,7 @@ ColumnLayout {
         delegate: Rectangle {
           id: pkg
           required property var modelData
-          readonly property string source: String(modelData.source).slice(0, 140)
+          readonly property string source: modelData.source ? String(modelData.source).slice(0, 140) : ""
           readonly property bool foreign: modelData.foreign === true
 
           Layout.fillWidth: true
@@ -390,7 +390,7 @@ ColumnLayout {
               }
               Plain {
                 Layout.fillWidth: true
-                text: "Source: " + pkg.source + "  ·  "
+                text: (pkg.source !== "" ? "Source: " + pkg.source : "No GitHub home page") + "  ·  "
                   + (pkg.foreign ? "not in a pacman repository" : pkg.modelData.repo ? "from " + String(pkg.modelData.repo).slice(0, 40) : "repository unknown")
                 color: view.foreground
                 opacity: 0.6
@@ -400,8 +400,20 @@ ColumnLayout {
             }
 
             Button {
+              text: "Recipe"
+              tooltipText: "Read its AUR build recipe, which is what runs when it is built and installed"
+              visible: pkg.foreign
+              bordered: true
+              foreground: view.foreground
+              accent: view.accent
+              fontFamily: view.fontFamily
+              onClicked: view.scout.scanRecipe(String(pkg.modelData.name))
+            }
+
+            Button {
               text: "Source"
               tooltipText: "Scan the repository named as its home page"
+              visible: pkg.source !== ""
               bordered: true
               foreground: view.foreground
               accent: view.accent
@@ -759,7 +771,9 @@ ColumnLayout {
 
     Plain {
       Layout.fillWidth: true
-      text: view.scout.report && view.scout.report.api
+      text: view.scout.report && view.scout.report.api && view.scout.report.api.local === true
+        ? "This report used no GitHub API requests."
+        : view.scout.report && view.scout.report.api
         ? "GitHub API, " + (view.scout.report.api.authenticated === true ? "signed in through gh" : "anonymous") + ": "
           + Number(view.scout.report.api.remaining) + " of " + Number(view.scout.report.api.limit) + " requests left this hour."
           + (view.scout.report.api.tokenRejected === true ? " GitHub rejected the gh token." : "")
