@@ -27,7 +27,7 @@ The puzzle button in the title row lists two things. The first is the Omarchy sh
 
 - **Installed** scans the copy on this machine. It uses no network unless the plugin has lockfiles.
 - **Source** scans the repository the plugin came from, at its latest commit.
-- **Compare** runs both scans and shows what differs: the two commits, every installed file that does not match the source at the installed commit, and the findings that appear in one report and not the other.
+- **Compare** shows only what differs. It opens with a verdict: the installed copy matches its source, or it differs. Below that are each changed file with the lines that differ, files added to or missing from the installed copy, how many commits newer the source is, and the findings that only one of the two scans reports. The full source report stays behind a button.
 
 A plugin with no GitHub origin, such as one linked in from a system package, has the Installed button only.
 

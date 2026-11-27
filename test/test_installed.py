@@ -101,6 +101,31 @@ class Installed(unittest.TestCase):
         self.assertEqual((got["changed"], got["added"], got["missing"]), (["changed.txt"], ["added.txt"], ["gone.txt"]))
         self.assertEqual((got["checked"], got["generated"]), (3, 1))
 
+    def test_file_diffs_show_the_changed_lines(self):
+        root = make_plugin(self.tmp.name, "a.one", files={"a.txt": "one\nTWO\nthree\n", "b.bin": "x\x00y"})
+        upstream = {"a.txt": {"text": "one\ntwo\nthree\n"}, "b.bin": {"text": "x"}}
+        net = mock.Mock()
+        net.raw.side_effect = lambda owner, repo, commit, path, cap: upstream[path]
+        got = scout.file_diffs(scout.LocalContext(str(root), scout.Net(None)), net, "Owner", "Repo", SHA, ["a.txt", "b.bin"])
+        self.assertEqual(got[0]["lines"], ["@@ -1,3 +1,3 @@", " one", "-two", "+TWO", " three"])
+        self.assertEqual((got[1]["lines"], bool(got[1]["note"])), ([], True))
+        net.raw.assert_any_call("Owner", "Repo", SHA, "a.txt", scout.COMPARE_MAX_DIFF_BYTES)
+
+    def test_compare_text_leads_with_the_verdict(self):
+        base = {"plugin": {"id": "a.one"}, "repository": "Owner/Repo"}
+        same = {"verdict": "identical", "installedCommit": SHA, "sourceCommit": SHA, "sameCommit": True, "behind": 0,
+                "files": {"checked": 3, "changedCount": 0, "addedCount": 0, "missingCount": 0, "changed": [], "added": [], "missing": [], "diffs": []},
+                "onlyInstalled": [], "onlyInstalledCount": 0, "onlySource": [], "onlySourceCount": 0}
+        text = scout.format_compare({**base, "compare": same})
+        self.assertTrue(text.startswith("MATCHES:"))
+        self.assertIn("Both scans report the same findings.", text)
+        changed = {**same, "verdict": "modified", "sameCommit": False, "behind": 2, "sourceCommit": "b" * 40,
+                   "files": {**same["files"], "changedCount": 1, "changed": ["a.txt"], "diffs": [{"path": "a.txt", "lines": ["-two", "+TWO"], "more": 0, "note": ""}]}}
+        text = scout.format_compare({**base, "compare": changed})
+        self.assertTrue(text.startswith("DIFFERS:"))
+        self.assertIn("The source is 2 commits newer.", text)
+        self.assertIn("      +TWO", text)
+
     def test_diff_findings_leaves_out_repository_settings(self):
         f = lambda rule, path, sev="low": {"severity": sev, "rule": rule, "title": rule, "path": path}
         installed = {"checks": [{"id": "S6", "findings": [f("S6.makefile", "Makefile"), f("S6.direnv", ".envrc", "medium")]}]}
