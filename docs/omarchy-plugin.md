@@ -23,13 +23,15 @@ The button next to Close opens the same view as a normal window, which Hyprland 
 
 ## Installed plugins
 
-The puzzle button in the title row lists the Omarchy shell plugins in `~/.config/omarchy/plugins`, with the GitHub repository each was cloned from and the commit it is at. Each row has up to three buttons:
+The puzzle button in the title row lists two things. The first is the Omarchy shell plugins in `~/.config/omarchy/plugins`, with the GitHub repository each was cloned from and the commit it is at. Each row has up to three buttons:
 
 - **Installed** scans the copy on this machine. It uses no network unless the plugin has lockfiles.
 - **Source** scans the repository the plugin came from, at its latest commit.
 - **Compare** runs both scans and shows what differs: the two commits, every installed file that does not match the source at the installed commit, and the findings that appear in one report and not the other.
 
-A plugin with no GitHub origin, such as one linked in from a system package, has the Installed button only. The list is read by `bin/scout --installed`, which reads the manifest and the `.git` folder of each plugin as plain files and does not run git.
+A plugin with no GitHub origin, such as one linked in from a system package, has the Installed button only.
+
+The second is the pacman packages you installed by name whose home page is a GitHub repository, with a Source button that scans that repository. Packages that no pacman repository carries, such as AUR and local builds, come first and are tinted. A package's files are not scanned or compared, because an installed package is a build and not a copy of its source. The list is read from the plain-text files under `/var/lib/pacman`, and pacman is not run. The list is read by `bin/scout --installed`, which reads the manifest and the `.git` folder of each plugin as plain files and does not run git.
 
 The panel shows up to eight findings per check. The website or the terminal shows the rest. Open website, at the bottom of the panel, opens https://techluddite.github.io/Luddite-Scout/ in your browser.
 
@@ -38,7 +40,7 @@ If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that lo
 ## What it touches
 
 - It starts one process per scan, per listing of installed plugins and per comparison: `/usr/bin/timeout` running `/usr/bin/python3 -I -S bin/scout`, with a cleared environment and a fixed `PATH`. It starts nothing else.
-- For the installed plugins list it reads `~/.config/omarchy/plugins`. A plugin ID is checked against a fixed pattern before it reaches the helper, and the helper builds the folder path itself.
+- For the installed list it reads `~/.config/omarchy/plugins` and the package database under `/var/lib/pacman`. A plugin ID is checked against a fixed pattern before it reaches the helper, and the helper builds the folder path itself.
 - It reads at most about 2 MB of the scan's output and renders all of it as plain text.
 - It writes no files and keeps no state, cache, credentials or configuration.
 - It contacts the four hosts listed in [data handling](data-handling.md), through `bin/scout` only.

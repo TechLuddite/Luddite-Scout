@@ -35,7 +35,7 @@ The readable report shows every finding with its file and line. The JSON report 
 ## Installed Omarchy plugins
 
 ```sh
-bin/scout --installed                 # each plugin, its GitHub source and its commit
+bin/scout --installed                 # each plugin, its GitHub source and its commit, then packages with a GitHub home page
 bin/scout --plugin ID                 # scan the installed copy
 bin/scout --plugin ID --compare       # scan the copy and its source, and report the difference
 ```

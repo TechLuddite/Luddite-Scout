@@ -126,7 +126,7 @@ ColumnLayout {
     PanelActionButton {
       // nf-md-puzzle, U+F0431, and nf-md-magnify, U+F0349
       iconText: String.fromCodePoint(view.scout.mode === "installed" ? 0xF0349 : 0xF0431)
-      tooltipText: view.scout.mode === "installed" ? "Back to scanning a repository" : "Installed plugins"
+      tooltipText: view.scout.mode === "installed" ? "Back to scanning a repository" : "Installed plugins and packages"
       foreground: view.foreground
       fontFamily: view.fontFamily
       onClicked: view.scout.mode === "installed" ? view.scout.mode = "scan" : view.scout.showInstalled()
@@ -189,7 +189,7 @@ ColumnLayout {
     Layout.fillWidth: true
     visible: view.scout.running || view.scout.errorText !== ""
     text: view.scout.running
-      ? (view.scout.mode === "installed" ? "Reading the plugins folder." : "Scanning. A large repository takes up to a minute.")
+      ? (view.scout.mode === "installed" ? "Reading the plugins folder and the package database." : "Scanning. A large repository takes up to a minute.")
       : view.scout.errorText
     color: view.scout.errorText !== "" && !view.scout.running ? view.urgent : view.foreground
     opacity: view.scout.running ? 0.7 : 1.0
@@ -312,6 +312,101 @@ ColumnLayout {
               accent: view.accent
               fontFamily: view.fontFamily
               onClicked: view.scout.compareInstalled(plugin.pluginId)
+            }
+          }
+        }
+      }
+
+      PanelSectionHeader {
+        Layout.topMargin: Style.spacing.lg
+        visible: view.scout.packages.length > 0
+        text: "PACKAGES WITH A GITHUB SOURCE"
+        foreground: view.foreground
+        fontFamily: view.fontFamily
+      }
+
+      Plain {
+        Layout.fillWidth: true
+        visible: view.scout.packages.length > 0
+        text: "Packages you installed by name whose home page is a GitHub repository. Packages from outside the pacman repositories, such as AUR builds, come first."
+        color: view.foreground
+        opacity: 0.6
+        font.family: view.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      TextField {
+        id: packageFilter
+        Layout.fillWidth: true
+        visible: view.scout.packages.length > 8
+        maximumLength: 60
+        placeholderText: "Filter packages"
+        foreground: view.foreground
+        accent: view.accent
+        font.family: view.fontFamily
+      }
+
+      Repeater {
+        model: {
+          var q = String(packageFilter.text || "").toLowerCase()
+          var out = []
+          var rows = view.scout.packages
+          for (var i = 0; i < rows.length && out.length < 200; i++) {
+            if (q === "" || String(rows[i].name).toLowerCase().indexOf(q) !== -1 || String(rows[i].source).toLowerCase().indexOf(q) !== -1)
+              out.push(rows[i])
+          }
+          return out
+        }
+
+        delegate: Rectangle {
+          id: pkg
+          required property var modelData
+          readonly property string source: String(modelData.source).slice(0, 140)
+          readonly property bool foreign: modelData.foreign === true
+
+          Layout.fillWidth: true
+          implicitHeight: pkgRow.implicitHeight + Style.spacing.md * 2
+          radius: Style.cornerRadius
+          color: Util.alpha(pkg.foreign ? view.accent : view.foreground, pkg.foreign ? 0.08 : 0.02)
+
+          RowLayout {
+            id: pkgRow
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.spacing.xxl
+            anchors.rightMargin: Style.spacing.xxl
+            spacing: Style.spacing.md
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: Style.spacing.xxs
+              Plain {
+                Layout.fillWidth: true
+                text: String(pkg.modelData.name).slice(0, 128) + "  " + String(pkg.modelData.version).slice(0, 60)
+                color: view.foreground
+                font.family: view.fontFamily
+                font.bold: pkg.foreign
+              }
+              Plain {
+                Layout.fillWidth: true
+                text: "Source: " + pkg.source + "  ·  "
+                  + (pkg.foreign ? "not in a pacman repository" : pkg.modelData.repo ? "from " + String(pkg.modelData.repo).slice(0, 40) : "repository unknown")
+                color: view.foreground
+                opacity: 0.6
+                font.family: view.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            Button {
+              text: "Source"
+              tooltipText: "Scan the repository named as its home page"
+              bordered: true
+              foreground: view.foreground
+              accent: view.accent
+              fontFamily: view.fontFamily
+              onClicked: { view.scout.target = pkg.source; view.scout.startScan(pkg.source) }
             }
           }
         }
