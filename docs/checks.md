@@ -1,6 +1,6 @@
 # Checks
 
-Every front end runs the same eight checks on one commit of the repository's default branch.
+Every front end runs the same nine checks on one commit of the repository's default branch.
 
 | Check | What it looks for |
 | --- | --- |
@@ -12,8 +12,9 @@ Every front end runs the same eight checks on one commit of the repository's def
 | S6 Build-time code | `build.rs`, npm install scripts, `setup.py`, `.envrc` and other code that runs on install, build or entry |
 | S7 Omarchy plugin | Only for repositories that are Omarchy plugins: markup-rendering `Text` items, uncapped process output, shell command strings, `sudo`, run-time installs, agent files shipped with the plugin |
 | S8 Agent traps | Reads every text file, as S3 does. Text addressed to an AI agent that tells it to stop, refuse, or not analyse the repository: high in an instruction file, medium or low elsewhere. Shell functions and aliases named after an agent command such as `claude` or `codex`, files with those names, and scripts that append to a shell startup file. File and folder names such as `decoy` or `honeypot`. Text about sending agents the wrong way or using up their context, and the names of tools built for that |
+| S9 Telemetry | Reads every text file except lockfiles and vendored folders. Host names of known telemetry, analytics and error-reporting services. Packages for those services in a manifest such as `package.json`, `pyproject.toml` or `Cargo.toml`, and at medium a package that reports each install to its maintainer. Code that reads a machine identifier such as `/etc/machine-id`. The names of telemetry settings, at info, so you can see which switch turns reporting off |
 
-S1 to S6 and S8 apply to any repository. S7 reports "not applicable" unless the repository has an Omarchy plugin manifest at its root.
+S1 to S6, S8 and S9 apply to any repository. S7 reports "not applicable" unless the repository has an Omarchy plugin manifest at its root.
 
 ## Status and findings
 

@@ -1784,6 +1784,86 @@ def run_traps(ctx, max_files=4000, max_bytes=60_000_000):
     return {"status": "partial" if not_covered or ctx.truncated else "ran", "notes": notes, "findings": findings}
 
 
+# ------------------------------------------------------------- S9 telemetry
+
+# Code and manifests that report usage, errors or machine details to a
+# remote service. js/checks/telemetry.js has the same patterns.
+TELEMETRY_HOST = re.compile(
+    r"(?<![\w.-])(?:[\w-]+\.)*(?:sentry\.io|posthog\.com|segment\.(?:io|com)|mixpanel\.com|amplitude\.com|google-analytics\.com|googletagmanager\.com"
+    r"|analytics\.google\.com|app-measurement\.com|crashlytics\.com|datadoghq\.(?:com|eu)|nr-data\.net|newrelic\.com|bugsnag\.com|rollbar\.com"
+    r"|appcenter\.ms|applicationinsights\.azure\.com|services\.visualstudio\.com|plausible\.io|scarf\.sh|honeycomb\.io|logrocket\.com|lr-ingest\.io"
+    r"|hotjar\.com|clarity\.ms|fullstory\.com|heapanalytics\.com|statsig\.com|statsigapi\.net|matomo\.cloud|cloudflareinsights\.com"
+    r"|telemetry\.[a-z0-9-]+\.[a-z]{2,})(?![\w-])", _F)
+TELEMETRY_PACKAGE = re.compile(
+    r"(?<![\w@/.-])(?:@sentry/[\w.-]+|sentry[-_]sdk|sentry|raven|posthog(?:[-_](?:js|node|python))?|@posthog/[\w.-]+|analytics-node|@segment/[\w.-]+"
+    r"|mixpanel(?:[-_]browser)?|amplitude[-_]?(?:js|analytics)?|@amplitude/[\w.-]+|@datadog/browser-rum|dd-trace|ddtrace|newrelic|bugsnag|@bugsnag/[\w.-]+"
+    r"|rollbar|applicationinsights|@microsoft/applicationinsights-[\w.-]+|@vercel/analytics|@vercel/speed-insights|react-ga4?|logrocket|@fullstory/[\w.-]+"
+    r"|@opentelemetry/exporter-[\w.-]+|opentelemetry-exporter-[\w.-]+|node-machine-id|py-machineid|machine-uid)(?![\w/-])", _F)
+INSTALL_TELEMETRY = re.compile(r"(?<![\w/.-])@scarf/scarf(?![\w/-])", _F)
+TELEMETRY_MANIFEST = re.compile(
+    r"(?:^|/)(?:package\.json|requirements[\w.-]*\.txt|pyproject\.toml|setup\.cfg|Pipfile|Cargo\.toml|go\.mod|Gemfile|composer\.json|pubspec\.yaml"
+    r"|build\.gradle(?:\.kts)?|pom\.xml|[^/]+\.csproj|Package\.swift)$")
+TELEMETRY_SETTING = re.compile(
+    r"\b(?:DO_NOT_TRACK|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TELEMETRY|ANALYTICS|CRASH_REPORTS?|CRASH_REPORTING|USAGE_STATS|USAGE_DATA)(?:_[A-Z0-9]+)*"
+    r"|(?:TELEMETRY|ANALYTICS)_(?:DISABLED?|ENABLED?|OPT_?OUT|OPT_?IN|OFF|ON|URL|HOST|ENDPOINT|KEY|ID)\b)", re.A)
+MACHINE_ID = re.compile(
+    r"/etc/machine-id|/var/lib/dbus/machine-id|IOPlatformUUID|IOPlatformSerialNumber|\bMachineGuid\b|\bwmic\s+(?:csproduct|bios)\s+get\b|\bdmidecode\b"
+    r"|\buuid\.getnode\s*\(|\bmachineIdSync\s*\(|\bhostnamectl\b[^\n]{0,40}machine", _F)
+DOC_EXT = {"md", "mdc", "txt", "rst", "adoc", "html", "htm"}
+
+
+def analyze_telemetry_text(path, text):
+    out = []
+    hits = _trap_hits(TELEMETRY_HOST, text)
+    if hits:
+        out.append(_trap_finding("low", "S9.telemetry-host", "Names a telemetry, analytics or error-reporting service", hits))
+    if TELEMETRY_MANIFEST.search(path):
+        hits = _trap_hits(INSTALL_TELEMETRY, text)
+        if hits:
+            out.append(_trap_finding("medium", "S9.install-telemetry", "Depends on a package that reports each install to its maintainer", hits))
+        hits = _trap_hits(TELEMETRY_PACKAGE, text)
+        if hits:
+            out.append(_trap_finding("low", "S9.telemetry-package", "Depends on a telemetry, analytics or error-reporting package", hits))
+    if extension(path) not in DOC_EXT:
+        hits = _trap_hits(MACHINE_ID, text)
+        if hits:
+            out.append(_trap_finding("low", "S9.machine-id", "Reads an identifier of the machine", hits))
+    hits = _trap_hits(TELEMETRY_SETTING, text)
+    if hits:
+        out.append(_trap_finding("info", "S9.telemetry-setting", "Names a telemetry setting", hits))
+    return out
+
+
+def run_telemetry(ctx, max_files=4000, max_bytes=60_000_000):
+    findings = []
+    candidates = ctx.text_blobs()
+    selected, budget = [], max_bytes
+    for b in candidates:
+        if len(selected) >= max_files or b.get("size", 0) > budget:
+            break
+        selected.append(b)
+        budget -= b.get("size", 0)
+    not_covered = len(candidates) - len(selected)
+    scanned = skipped = 0
+    for path, res in ctx.fetch_many([b["path"] for b in selected]):
+        if "text" not in res:
+            skipped += 1
+            continue
+        scanned += 1
+        if SKIP_DIRS.search(path) or re.search(r"(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|[^/]+\.lock)$", path):
+            continue
+        findings += [{**f, "path": path} for f in analyze_telemetry_text(path, res["text"])]
+    findings.sort(key=lambda f: -RANK[f["severity"]])
+    notes = [f"Scanned {scanned} text files. Lockfiles and vendored folders are left out."]
+    if skipped:
+        notes.append(f"{skipped} files could not be read as text (binary, too large, or not served).")
+    if not_covered:
+        notes.append(f"{not_covered} files not read because of the size or count cap.")
+    if ctx.truncated:
+        notes.append("The file list from GitHub was truncated, so some files were never listed.")
+    return {"status": "partial" if not_covered or ctx.truncated else "ran", "notes": notes, "findings": findings}
+
+
 # ------------------------------------------------------------------- scan
 
 CHECKS = [
@@ -1795,8 +1875,9 @@ CHECKS = [
     ("S6", "Build-time code", run_build),
     ("S7", "Omarchy plugin", run_omarchy),
     ("S8", "Agent traps", run_traps),
+    ("S9", "Telemetry", run_telemetry),
 ]
-RUN_ORDER = ["S1", "S2", "S4", "S6", "S7", "S5", "S3", "S8"]
+RUN_ORDER = ["S1", "S2", "S4", "S6", "S7", "S5", "S3", "S8", "S9"]
 
 
 class Context:
@@ -2194,6 +2275,11 @@ RULES = {
     "S8.misleads-agents": "Text describes misleading, trapping or exhausting an AI agent",
     "S8.known-trap-tool": "Text names a tool built to trap or mislead AI agents",
     "S8.decoy-name": "File or folder name suggests decoy or bait content",
+    "S9.telemetry-host": "Text names a telemetry, analytics or error-reporting service",
+    "S9.telemetry-package": "Manifest lists a telemetry, analytics or error-reporting package",
+    "S9.install-telemetry": "Manifest lists a package that reports each install to its maintainer",
+    "S9.machine-id": "Code reads an identifier of the machine",
+    "S9.telemetry-setting": "Text names a telemetry setting",
     "unclassified": "Finding without a rule ID. Read the full report.",
 }
 STATUSES = {"ran", "partial", "skipped", "not-applicable"}
