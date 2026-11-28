@@ -1,17 +1,25 @@
 # Luddite Scout
 
 [![test](https://github.com/TechLuddite/Luddite-Scout/actions/workflows/test.yml/badge.svg)](https://github.com/TechLuddite/Luddite-Scout/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FTechLuddite%2FLuddite-Scout%2Fmain%2Fmanifest.json&query=%24.version&label=version&color=blue)](manifest.json)
-[![licence: MIT](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
-![status: experimental](https://img.shields.io/badge/status-experimental-orange)
-![runtime dependencies: none](https://img.shields.io/badge/runtime%20dependencies-none-brightgreen)
-![Python: standard library only](https://img.shields.io/badge/Python-standard%20library%20only-3776AB?logo=python&logoColor=white)
-![JavaScript: no build step](https://img.shields.io/badge/JavaScript-no%20build%20step-F7DF1E?logo=javascript&logoColor=black)
-![QML: Omarchy plugin](https://img.shields.io/badge/QML-Omarchy%20plugin-41CD52?logo=qt&logoColor=white)
+[![version, as in manifest.json](docs/badges/version.svg)](manifest.json)
+[![licence: MIT](docs/badges/licence.svg)](LICENSE)
+![status: experimental](docs/badges/status.svg)
+![runtime dependencies: none](docs/badges/dependencies.svg)
+![Python: standard library only](docs/badges/python.svg)
+![JavaScript: no build step](docs/badges/javascript.svg)
+![QML: Omarchy plugin](docs/badges/qml.svg)
 
 A pre-flight check for a public GitHub repository, run before you point a coding agent at it, build it, or install it. Give it a repository and get a report a person can read in a few minutes. It never runs code from the repository.
 
-![The Luddite Scout window showing a report for TechLuddite/luddite-gestures, with severity totals and one card for each check](docs/screenshots/plugin-report.png)
+| A report in the Omarchy window | Compare: installed copy against source |
+| --- | --- |
+| ![The Luddite Scout window showing a report for TechLuddite/luddite-gestures, with severity totals and one card for each check](docs/screenshots/plugin-report.png) | ![A comparison of an installed copy of luddite-gestures against TechLuddite/luddite-gestures, reporting one changed file with its changed line and one added file](docs/screenshots/plugin-compare.png) |
+
+| Installed plugins and their sources | The website's summary |
+| --- | --- |
+| ![The installed plugins list, showing three TechLuddite plugins with Installed, Source and Compare buttons](docs/screenshots/plugin-installed.png) | ![Website report summary for TechLuddite/NetReady, listing S1 to S9 with their status and finding counts](docs/screenshots/website-summary.png) |
+
+All four show repositories from this account, captured on 2026-11-27 at version 0.5.0.
 
 **Contents:** [Front ends](#front-ends) · [What it checks](#what-it-checks) · [Omarchy plugin](#omarchy-plugin) · [Terminal](#terminal) · [Documentation](#documentation) · [Credits](#credits) · [Help and security](#help-and-security) · [Licence](#licence)
 
@@ -44,10 +52,6 @@ Four ways to use it, all running the same checks:
 
 Findings are pattern matches for a person to judge. A clean report is not proof that a repository is safe. [docs/checks.md](docs/checks.md) has the full list, what each status means, and example reports.
 
-The website's summary for [TechLuddite/NetReady](https://github.com/TechLuddite/NetReady):
-
-![Website report summary for TechLuddite/NetReady, listing S1 to S9 with their status and finding counts](docs/screenshots/website-summary.png)
-
 ## Omarchy plugin
 
 ```sh
@@ -57,13 +61,9 @@ omarchy plugin enable io.github.techluddite.luddite-scout
 
 The bar icon opens a panel. One button opens the same view as a normal window, which follows the theme and the glassy windows setting.
 
-The puzzle button lists your installed Omarchy plugins and the packages you installed from outside the pacman repositories, with the repository each came from:
-
-![The installed plugins list, showing three TechLuddite plugins with Installed, Source and Compare buttons](docs/screenshots/plugin-installed.png)
+The puzzle button lists your installed Omarchy plugins and the packages you installed from outside the pacman repositories, with the repository each came from.
 
 Compare checks an installed plugin against its source and shows only what differs: changed lines, added and missing files, and how far behind the source it is.
-
-![A comparison of an installed copy of luddite-gestures against TechLuddite/luddite-gestures, reporting one changed file with its changed line and one added file](docs/screenshots/plugin-compare.png)
 
 To remove the plugin:
 
