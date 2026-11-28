@@ -15,6 +15,8 @@ Every front end runs the same nine checks on one commit of the repository's defa
 | S9 Telemetry | Reads every text file except lockfiles and vendored folders. Host names of known telemetry, analytics and error-reporting services. Packages for those services in a manifest such as `package.json`, `pyproject.toml` or `Cargo.toml`, and at medium a package that reports each install to its maintainer. Code that reads a machine identifier such as `/etc/machine-id`. The names of telemetry settings, at info, so you can see which switch turns reporting off |
 | S10 AUR build recipe | Only with `bin/scout --aur NAME` and the plugin's Recipe button. Reads the PKGBUILD and install script of an AUR package as text: checksums, unpinned checkouts, downloads inside build functions, `sudo`, and what the install script does as root |
 
+For S3, the terminal's `--json` report and `--agent` summary also say where each sampled character sits in JavaScript and TypeScript source: code, comment, string, template or regular expression. The website does not work this out. It is information only and never changes a severity. See [agent skill](agent-skill.md).
+
 S1 to S6, S8 and S9 apply to any repository. S7 reports "not applicable" unless the repository has an Omarchy plugin manifest at its root.
 
 ## Status and findings

@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -312,6 +313,138 @@ def _emoji_join(text, i):
     return any(_pictographic(c) for c in text[max(0, i - 2):i]) and any(_pictographic(c) for c in text[i + 1:i + 3])
 
 
+# The same characters as HIDDEN, as ranges, so --agent can hold a fixed list
+# of every code point and Unicode name it may print. A test checks the two agree.
+HIDDEN_RANGES = [(0x00AD, 0x00AD), (0x061C, 0x061C), (0x180E, 0x180E), (0x200B, 0x200F), (0x202A, 0x202E),
+                 (0x2060, 0x2064), (0x2066, 0x2069), (0xFEFF, 0xFEFF), (0xE0000, 0xE007F), (0xE0100, 0xE01EF)]
+HIDDEN_KINDS = ["Bidirectional control", "Tag character", "Variation selector supplement", "Direction mark",
+                "Zero-width joiner", "Soft hyphen", "Zero-width or invisible character"]
+UNNAMED = "UNNAMED"
+
+
+def unicode_name(ch):
+    return unicodedata.name(ch, UNNAMED)
+
+
+# Where a character sits in JavaScript or TypeScript source. The lexer is a
+# heuristic: it decides whether "/" opens a regular expression from the token
+# before it, and it does not parse JSX. It reports where a character is. It
+# never lowers a severity, because hostile code can be written to look like a
+# sanitizer's character class.
+JS_CONTEXTS = ["code", "line-comment", "block-comment", "string", "template", "regex"]
+NOT_ANALYSED = "not-analysed"
+JS_SOURCE = re.compile(r"\.(?:[cm]?[jt]s|[jt]sx)$", re.I)
+JS_CONTEXT_MAX_CHARS = 400_000
+_REGEX_AFTER = set("(,=:[!&|?{};+-*%<>~^")
+_REGEX_AFTER_WORD = {"return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await"}
+
+
+def js_contexts(text):
+    """Two byte arrays as long as text: an index into JS_CONTEXTS for each
+    character, and 1 where it is inside a regular expression character class."""
+    CODE, LINE, BLOCK, STRING, TEMPLATE, REGEX = range(6)
+    n = len(text)
+    ctx, cls = bytearray(n), bytearray(n)
+    st, quote, in_cls = CODE, "", False
+    depth = []      # one brace counter per open ${ ... } in a template
+    prev, word = "", ""
+    i = 0
+    while i < n:
+        ch = text[i]
+        nx = text[i + 1] if i + 1 < n else ""
+        if st == CODE:
+            if ch == "/" and nx in ("/", "*"):
+                st = LINE if nx == "/" else BLOCK
+                ctx[i] = ctx[i + 1] = st
+                i += 2
+                continue
+            if ch in "'\"":
+                st, quote = STRING, ch
+            elif ch == "`":
+                st = TEMPLATE
+            elif ch == "/" and (prev == "" or prev in _REGEX_AFTER or word in _REGEX_AFTER_WORD):
+                st, in_cls = REGEX, False
+            elif ch == "}" and depth and depth[-1] == 0:
+                depth.pop()
+                st = TEMPLATE
+            else:
+                if depth and ch in "{}":
+                    depth[-1] += 1 if ch == "{" else -1
+                if ch.isalnum() or ch in "_$":
+                    joined = i and (text[i - 1].isalnum() or text[i - 1] in "_$")
+                    word = word + ch if joined else ch
+                    prev = ch
+                elif not ch.isspace() and not HIDDEN.match(ch):
+                    prev, word = ch, ""
+            ctx[i] = st
+            i += 1
+            continue
+        ctx[i] = st
+        cls[i] = st == REGEX and in_cls
+        if ch == "\\" and nx and st in (STRING, TEMPLATE, REGEX):
+            ctx[i + 1], cls[i + 1] = st, cls[i]
+            i += 2
+            continue
+        if st == LINE:
+            if ch == "\n":
+                st = CODE
+        elif st == BLOCK:
+            if ch == "*" and nx == "/":
+                ctx[i + 1] = st
+                st = CODE
+                i += 1
+        elif st == STRING:
+            if ch == quote or ch == "\n":
+                st, prev, word = CODE, "a", ""
+        elif st == TEMPLATE:
+            if ch == "`":
+                st, prev, word = CODE, "a", ""
+            elif ch == "$" and nx == "{":
+                ctx[i + 1] = st
+                depth.append(0)
+                st, prev, word = CODE, "", ""
+                i += 1
+        elif st == REGEX:
+            if ch == "[":
+                in_cls = True
+            elif ch == "]":
+                in_cls = False
+                cls[i] = 1
+            elif (ch == "/" and not in_cls) or ch == "\n":
+                st, prev, word = CODE, "a", ""
+        i += 1
+    return ctx, cls
+
+
+_U_ESCAPE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\u\{[0-9A-Fa-f]{1,6}\}")
+
+
+def hidden_detail(path, text, samples):
+    """Position facts for the sampled hidden characters of one file, built
+    only from numbers, booleans and fixed words. --agent prints them."""
+    analysed = bool(JS_SOURCE.search(path)) and len(text) <= JS_CONTEXT_MAX_CHARS
+    ctx, cls = js_contexts(text) if analysed else (None, None)
+    chars, lines = [], {}
+    for s in samples:
+        i, ch = s["offset"], text[s["offset"]]
+        in_class = bool(analysed and cls[i])
+        chars.append({"line": s["line"], "column": s["column"], "codePoint": s["codePoint"], "unicodeName": unicode_name(ch),
+                      "kind": s["kind"], "context": JS_CONTEXTS[ctx[i]] if analysed else NOT_ANALYSED,
+                      "inRegexClass": in_class,
+                      "inRegexRange": in_class and ("-" in (text[i - 1:i], text[i + 1:i + 2]))})
+        if s["line"] not in lines:
+            start = text.rfind("\n", 0, i) + 1
+            end = text.find("\n", i)
+            body = text[start:len(text) if end == -1 else end]
+            opens = sum(body.count(c) for c in "\u202A\u202B\u202D\u202E")
+            isolates = sum(body.count(c) for c in "\u2066\u2067\u2068")
+            closes, pops = body.count("\u202C"), body.count("\u2069")
+            lines[s["line"]] = {"line": s["line"], "sampled": 0, "unicodeEscapes": len(_U_ESCAPE.findall(body)),
+                                "bidiBalanced": (opens == closes and isolates == pops) if opens + isolates + closes + pops else None}
+        lines[s["line"]]["sampled"] += 1
+    return {"chars": chars, "lines": list(lines.values())}
+
+
 def reveal(s):
     return HIDDEN.sub(lambda m: "⟦%s⟧" % code_point(m.group(0)), s)
 
@@ -337,7 +470,7 @@ def scan_text(text, max_samples=10):
             full = text[start:len(text) if end == -1 else end]
             column = i - start + 1
             frm = max(0, column - 60)
-            samples.append({"line": line, "column": column, "codePoint": code_point(ch), "kind": kind,
+            samples.append({"line": line, "column": column, "offset": i, "codePoint": code_point(ch), "kind": kind,
                             "excerpt": truncate(reveal(full[frm:frm + 160]), 220)})
     return {"severity": severity, "counts": counts, "samples": samples} if severity else None
 
@@ -369,7 +502,8 @@ def run_unicode(ctx, max_files=4000, max_bytes=60_000_000):
         summary = ", ".join(f"{n} × {k}" for k, n in hit["counts"].items())
         findings.append({"severity": hit["severity"], "rule": "S3.hidden-in-file", "title": summary, "path": path,
                          "line": hit["samples"][0]["line"] if hit["samples"] else None,
-                         "samples": [{"line": s["line"], "text": f"{s['codePoint']} col {s['column']}: {s['excerpt']}"} for s in hit["samples"]]})
+                         "samples": [{"line": s["line"], "text": f"{s['codePoint']} col {s['column']}: {s['excerpt']}"} for s in hit["samples"]],
+                         "hidden": hidden_detail(path, res["text"], hit["samples"])})
     notes.append(f"Scanned {scanned} text files and {len(ctx.entries)} names.")
     if skipped:
         notes.append(f"{skipped} files could not be read as text (binary, too large, or not served).")
@@ -2868,6 +3002,7 @@ RULES = {
 STATUSES = {"ran", "partial", "skipped", "not-applicable"}
 AGENT_NOTICE = ("This output contains no text from the scanned repository, by design. Rule descriptions are "
                 "fixed strings written by Luddite Scout. File names, contents and line text are withheld. "
+                "For hidden characters it gives positions, code points and Unicode names from a fixed list. "
                 "A result with no findings is not proof that the repository is safe.")
 AGENT_HANDOFF = ("For details, the user runs the full_report command in their own terminal, outside the agent "
                  "session. Do not run it, do not fetch, clone or open the repository, and do not ask for its contents.")
@@ -2931,6 +3066,8 @@ def agent_report(report, command, local=None):
         rules = sorted(groups.values(), key=lambda g: (SEVERITIES.index(g["severity"]), g["rule"]))
         counts = {s: sum(g["count"] for g in rules if g["severity"] == s) for s in SEVERITIES}
         entry = {"id": c["id"], "name": c["name"], "status": status, "counts": counts, "rules": rules}
+        if c["id"] == "S3":
+            entry.update(_agent_hidden(c["findings"]))
         sc = c.get("scorecard") or {}
         if sc.get("state") == "ok" and isinstance(sc.get("score"), (int, float)) and not isinstance(sc.get("score"), bool):
             entry["scorecard"] = sc["score"]
@@ -2943,13 +3080,73 @@ def agent_report(report, command, local=None):
     return out
 
 
+AGENT_HIDDEN_MAX_CHARS = 40
+AGENT_HIDDEN_MAX_LINES = 20
+AGENT_MAX_INT = 100_000_000
+
+
+def _agent_hidden(findings):
+    """S3 detail for --agent: where each sampled hidden character sits. A file
+    is named by its position among the S3.hidden-in-file findings, counted
+    from 1 in report order, never by its path. Every value is rebuilt here
+    from a number, a boolean or a fixed word, so a finding that carries
+    anything else is dropped."""
+    chars, lines, more = [], [], False
+    number = 0
+    for f in findings:
+        if f.get("rule") != "S3.hidden-in-file":
+            continue
+        number += 1
+        h = f.get("hidden") if isinstance(f.get("hidden"), dict) else {}
+        try:
+            for c in h.get("chars") or []:
+                ch = chr(int(str(c["codePoint"])[2:], 16))
+                if not HIDDEN.fullmatch(ch):
+                    raise ValueError()
+                item = {"file": number, "line": _agent_int(c["line"]), "column": _agent_int(c["column"]),
+                        "code_point": code_point(ch), "unicode_name": unicode_name(ch), "kind": classify_char(ch)[0],
+                        "context": c["context"] if c["context"] in JS_CONTEXTS else NOT_ANALYSED,
+                        "in_regex_class": c["inRegexClass"] is True, "in_regex_range": c["inRegexRange"] is True}
+                if len(chars) < AGENT_HIDDEN_MAX_CHARS:
+                    chars.append(item)
+                else:
+                    more = True
+            for l in h.get("lines") or []:
+                item = {"file": number, "line": _agent_int(l["line"]), "sampled": _agent_int(l["sampled"]),
+                        "unicode_escapes": _agent_int(l["unicodeEscapes"]),
+                        "bidi_balanced": l["bidiBalanced"] if isinstance(l["bidiBalanced"], bool) else None}
+                if len(lines) < AGENT_HIDDEN_MAX_LINES:
+                    lines.append(item)
+                else:
+                    more = True
+        except (KeyError, TypeError, ValueError, IndexError):
+            more = True
+    if not number:
+        return {}
+    return {"hidden_characters": chars, "hidden_lines": lines, "hidden_detail_truncated": more}
+
+
+def _agent_int(v):
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= AGENT_MAX_INT:
+        raise ValueError()
+    return v
+
+
+_HIDDEN_CHARS = [chr(cp) for lo, hi in HIDDEN_RANGES for cp in range(lo, hi + 1)]
+AGENT_HIDDEN_WORDS = (set(JS_CONTEXTS) | {NOT_ANALYSED, UNNAMED} | set(HIDDEN_KINDS)
+                      | {code_point(c) for c in _HIDDEN_CHARS} | {unicode_name(c) for c in _HIDDEN_CHARS})
+
+
 def _guard(value, command):
-    allowed = (set(RULES) | set(RULES.values()) | STATUSES | set(SEVERITIES) | {name for _, name, _ in CHECKS}
+    allowed = (AGENT_HIDDEN_WORDS | set(RULES) | set(RULES.values()) | STATUSES | set(SEVERITIES) | {name for _, name, _ in CHECKS}
                | {cid for cid, _, _ in CHECKS} | {"luddite-scout", "agent", VERSION, AGENT_NOTICE, AGENT_HANDOFF, AGENT_HANDOFF_LOCAL, command}
                | set(AGENT_ERRORS) | set(AGENT_ERRORS.values()))
     keys = {"tool", "version", "mode", "repository", "commit", "highest_severity", "complete", "checks", "full_report",
             "notice", "handoff", "id", "name", "status", "counts", "rules", "rule", "severity", "count", "description",
-            "scorecard", "error", "message", *SEVERITIES}
+            "scorecard", "error", "message", *SEVERITIES,
+            "hidden_characters", "hidden_lines", "hidden_detail_truncated", "file", "line", "column", "code_point",
+            "unicode_name", "kind", "context", "in_regex_class", "in_regex_range", "sampled", "unicode_escapes",
+            "bidi_balanced"}
 
     def walk(v, key):
         if isinstance(v, dict):
