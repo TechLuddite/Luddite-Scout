@@ -171,6 +171,22 @@ class TerminalOutput(unittest.TestCase):
         self.assertIsNone(scout.TERMINAL_UNSAFE.search(out))
         self.assertEqual(json.loads(out)["checks"][0]["notes"], [self.HOSTILE])
 
+    def test_hidden_ranges_match_the_hidden_pattern(self):
+        matched = {cp for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF and scout.HIDDEN.match(chr(cp))}
+        self.assertEqual(matched, {cp for lo, hi in scout.HIDDEN_RANGES for cp in range(lo, hi + 1)})
+        self.assertEqual({scout.classify_char(chr(cp))[0] for cp in matched}, set(scout.HIDDEN_KINDS))
+
+    def test_javascript_contexts(self):
+        src = ('const a = b / c; // n\u00ad\n/* k\u200b */ const re = /[\u200b-\u200f]x\\/\u200e/g;\n'
+               'const s = "q\u202e"; const t = `x${ {a: 1}.a + \'\u2066\' }\u200d`;\n'
+               'return /\u200c/.test(s)\nx = y /2/ \u2060 3\n')
+        ctx, cls = scout.js_contexts(src)
+        got = [(scout.code_point(ch), scout.JS_CONTEXTS[ctx[i]], cls[i]) for i, ch in enumerate(src) if scout.HIDDEN.match(ch)]
+        self.assertEqual(got, [
+            ("U+00AD", "line-comment", 0), ("U+200B", "block-comment", 0), ("U+200B", "regex", 1), ("U+200F", "regex", 1),
+            ("U+200E", "regex", 0), ("U+202E", "string", 0), ("U+2066", "string", 0), ("U+200D", "template", 0),
+            ("U+200C", "regex", 0), ("U+2060", "code", 0)])
+
     def test_s3_samples_are_printed_with_code_points_and_columns(self):
         # A fullwidth letter stands for any other character outside ASCII.
         body = 'ok = 1\nconst re = /[\u200b-\u200f]/;\nconst s = "a\u202eb\u2066c \uff21";\n'

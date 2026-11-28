@@ -47,6 +47,7 @@ FILES = {
                                 f"      - run: echo \"${{{{ github.event.issue.title }}}}\" {MARK}\n"
                                 f"      - run: echo \"${{{{ inputs.x }}}}\" {MARK}\n",
     f"src/{MARK}\u202e.txt": f"{MARK}\u202e{INJECT}\U000E0041\n",
+    f"src/{MARK}.js": f"const re = /[\u200b-\u200f]/; // {INJECT}\nconst s = \"{INJECT}\u202e{MARK}\\u0041\";\n",
     "package.json": json.dumps({"name": MARK, "scripts": {"postinstall": MARK}}),
     "package-lock.json": json.dumps({"packages": {"": {}, f"node_modules/{MARK}": {"version": "1.0.0"}}}),
     "build.rs": MARK,
@@ -139,6 +140,51 @@ class AgentMode(unittest.TestCase):
                      "S2.instructions-differ", "S3.hidden-in-name", "S3.hidden-in-file", "S4.untrusted-input-in-script",
                      "S5.known-advisories", "S6.npm-install-script", "S7.sudo", "S7.binary"):
             self.assertIn(want, rules)
+
+    def test_agent_report_places_hidden_characters(self):
+        code, out, _ = self.run_main(["--agent", f"o/{MARK}"])
+        s3 = next(c for c in json.loads(out)["checks"] if c["id"] == "S3")
+        self.assertFalse(s3["hidden_detail_truncated"])
+        chars = {(c["code_point"], c["line"], c["column"]): c for c in s3["hidden_characters"]}
+        first = chars[("U+200B", 1, 14)]
+        self.assertEqual((first["unicode_name"], first["context"], first["in_regex_class"], first["in_regex_range"]),
+                         ("ZERO WIDTH SPACE", "regex", True, True))
+        override = next(c for c in s3["hidden_characters"] if c["code_point"] == "U+202E" and c["context"] == "string")
+        self.assertEqual((override["unicode_name"], override["kind"], override["in_regex_class"]),
+                         ("RIGHT-TO-LEFT OVERRIDE", "Bidirectional control", False))
+        line = next(l for l in s3["hidden_lines"] if (l["file"], l["line"]) == (override["file"], override["line"]))
+        self.assertEqual((line["sampled"], line["unicode_escapes"], line["bidi_balanced"]), (1, 1, False))
+        # The .txt file is not JavaScript, so its characters carry no context.
+        self.assertIn("not-analysed", {c["context"] for c in s3["hidden_characters"]})
+        self.assertEqual({c["file"] for c in s3["hidden_characters"]}, {1, 2})
+
+    def test_agent_hidden_detail_rebuilds_every_value(self):
+        hostile = {"line": 1, "column": 1, "codePoint": "U+202E", "unicodeName": INJECT, "kind": INJECT, "context": INJECT,
+                   "inRegexClass": INJECT, "inRegexRange": 1}
+        finding = lambda hidden: {"severity": "high", "rule": "S3.hidden-in-file", "title": INJECT, "path": INJECT, "hidden": hidden}
+        report = {"repository": "o/r", "commit": SHA, "checks": [{"id": "S3", "name": "Hidden Unicode", "status": "ran", "findings": [
+            finding({"chars": [hostile], "lines": [{"line": 1, "sampled": 1, "unicodeEscapes": 0, "bidiBalanced": INJECT}]}),
+            finding({"chars": [{**hostile, "codePoint": INJECT}], "lines": []}),
+            finding({"chars": [{**hostile, "codePoint": "U+0041"}], "lines": []}),
+            finding({"chars": [{**hostile, "line": INJECT}], "lines": [{"line": True, "sampled": 1, "unicodeEscapes": 0, "bidiBalanced": None}]}),
+            finding(INJECT),
+            finding({"chars": [dict(hostile)] * 60, "lines": []})]}]}
+        data = scout.agent_report(report, "scout o/r")
+        out = json.dumps(data)
+        self.assertNotIn(MARK, out)
+        s3 = data["checks"][0]
+        self.assertTrue(s3["hidden_detail_truncated"])
+        self.assertEqual(len(s3["hidden_characters"]), scout.AGENT_HIDDEN_MAX_CHARS)
+        self.assertEqual(s3["hidden_characters"][0], {
+            "file": 1, "line": 1, "column": 1, "code_point": "U+202E", "unicode_name": "RIGHT-TO-LEFT OVERRIDE",
+            "kind": "Bidirectional control", "context": "not-analysed", "in_regex_class": False, "in_regex_range": False})
+        self.assertEqual({c["file"] for c in s3["hidden_characters"]}, {1, 6})
+        self.assertEqual(s3["hidden_lines"], [{"file": 1, "line": 1, "sampled": 1, "unicode_escapes": 0, "bidi_balanced": None}])
+
+    def test_guard_rejects_unlisted_hidden_values(self):
+        for key, value in (("context", INJECT), ("unicode_name", "LATIN CAPITAL LETTER A"), ("code_point", "U+0041"), ("kind", MARK)):
+            with self.assertRaises(scout.AgentGuardError):
+                scout._guard({"hidden_characters": [{key: value}]}, "scout o/r")
 
     def test_scan_failure_text_is_withheld(self):
         def boom(self, path):
