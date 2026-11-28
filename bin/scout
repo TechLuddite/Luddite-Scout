@@ -7,7 +7,9 @@ Reviews a public GitHub repository with the same checks as the web page
     scout owner/repo            human-readable report
     scout --json owner/repo     JSON report, used by the Omarchy panel
     scout --agent owner/repo    JSON summary for a coding agent: rule IDs and
-                                counts only, no text from the repository
+                                counts only, no text from the repository;
+                                --agent --dir PATH does the same for a local
+                                checkout
     scout --token-stdin ...     read a GitHub token from stdin, never argv
     scout --gh-token ...        use the token of the signed-in GitHub CLI (gh)
     scout --dir PATH            scan a local checkout instead, with the same
@@ -2879,7 +2881,13 @@ AGENT_NOTICE = ("This output contains no text from the scanned repository, by de
                 "A result with no findings is not proof that the repository is safe.")
 AGENT_HANDOFF = ("For details, the user runs the full_report command in their own terminal, outside the agent "
                  "session. Do not run it, do not fetch, clone or open the repository, and do not ask for its contents.")
+AGENT_HANDOFF_LOCAL = ("For details, the user runs the full_report command in their own terminal, outside the agent "
+                       "session, with PATH replaced by the folder that was scanned. The report quotes text from that "
+                       "folder, so do not run it inside the agent session.")
+AGENT_LOCAL_NAME = "local-checkout"
 AGENT_ERRORS = {
+    "invalid-dir-label": "With --dir, --name must be owner/repo and --commit must be a full 40-character SHA.",
+    "dir-unreadable": "The folder given to --dir does not exist or cannot be read.",
     "invalid-input": "The repository name was not valid. Use owner/repo or a github.com URL.",
     "not-found": "The repository was not found. It may be private, renamed or misspelled.",
     "private": "The repository is private. Luddite Scout only reviews public repositories.",
@@ -2897,12 +2905,23 @@ def _safe_owner_repo(owner, repo):
     return bool(NAME.match(str(owner))) and bool(REPO.match(str(repo))) and repo not in (".", "..")
 
 
-def agent_report(report, command):
+def agent_report(report, command, local=None):
     """The report with every repository-controlled string removed. Findings
     are grouped by rule and counted. Raises AgentGuardError if any string in
-    the result is outside the allowlist."""
-    owner, _, repo = report["repository"].partition("/")
-    if not _safe_owner_repo(owner, repo) or not SHA40.match(report["commit"]):
+    the result is outside the allowlist.
+
+    For a --dir scan, local is {"name": owner/repo or None, "commit": SHA or
+    None}, taken from the command line. The folder name is never used."""
+    if local is None:
+        name, commit, handoff = report["repository"], report["commit"], AGENT_HANDOFF
+        if not isinstance(commit, str):
+            raise AgentGuardError()
+    else:
+        name, commit, handoff = local.get("name") or AGENT_LOCAL_NAME, local.get("commit"), AGENT_HANDOFF_LOCAL
+    owner, _, repo = str(name).partition("/")
+    if name != AGENT_LOCAL_NAME and not _safe_owner_repo(owner, repo):
+        raise AgentGuardError()
+    if commit is not None and not SHA40.match(commit):
         raise AgentGuardError()
     highest = None
     complete = True
@@ -2927,16 +2946,16 @@ def agent_report(report, command):
             entry["scorecard"] = sc["score"]
         checks.append(entry)
     out = {"tool": "luddite-scout", "version": VERSION, "mode": "agent",
-           "repository": f"{owner}/{repo}", "commit": report["commit"],
+           "repository": name, "commit": commit,
            "highest_severity": highest, "complete": complete, "checks": checks,
-           "full_report": command, "notice": AGENT_NOTICE, "handoff": AGENT_HANDOFF}
+           "full_report": command, "notice": AGENT_NOTICE, "handoff": handoff}
     _guard(out, command)
     return out
 
 
 def _guard(value, command):
     allowed = (set(RULES) | set(RULES.values()) | STATUSES | set(SEVERITIES) | {name for _, name, _ in CHECKS}
-               | {cid for cid, _, _ in CHECKS} | {"luddite-scout", "agent", VERSION, AGENT_NOTICE, AGENT_HANDOFF, command}
+               | {cid for cid, _, _ in CHECKS} | {"luddite-scout", "agent", VERSION, AGENT_NOTICE, AGENT_HANDOFF, AGENT_HANDOFF_LOCAL, command}
                | set(AGENT_ERRORS) | set(AGENT_ERRORS.values()))
     keys = {"tool", "version", "mode", "repository", "commit", "highest_severity", "complete", "checks", "full_report",
             "notice", "handoff", "id", "name", "status", "counts", "rules", "rule", "severity", "count", "description",
@@ -2954,7 +2973,7 @@ def _guard(value, command):
         elif isinstance(v, str):
             if key == "repository":
                 o, _, r = v.partition("/")
-                ok = _safe_owner_repo(o, r)
+                ok = v == AGENT_LOCAL_NAME or _safe_owner_repo(o, r)
             elif key == "commit":
                 ok = bool(SHA40.match(v))
             else:
@@ -2972,13 +2991,17 @@ def agent_error(code):
     return out
 
 
-def full_report_command(target):
+def full_report_command(target, local=False):
     """The command the user runs in their own terminal for the full report.
-    Built from this script's own path and the validated owner/repo."""
-    ids = parse_repo_input(target)
+    Built from this script's own path and the validated owner/repo. For a
+    --dir scan it ends in the fixed word PATH, never the folder that was
+    given, because a folder name can hold text aimed at an agent."""
     script = os.path.realpath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)
     if not re.fullmatch(r"[A-Za-z0-9._/+-]{1,400}", script):
         script = "scout"
+    if local:
+        return f"python3 -I -S {script} --dir PATH"
+    ids = parse_repo_input(target)
     return f"python3 -I -S {script} {ids['owner']}/{ids['repo']}"
 
 
@@ -3088,7 +3111,7 @@ def main(argv):
     unknown = flags - {"--json", "--agent", "--token-stdin", "--gh-token", "--help", "--version", "--dir"}
     if "--dir" not in flags and values:
         unknown = unknown | set(values)
-    if "--dir" in flags and flags & {"--agent", "--token-stdin", "--gh-token"}:
+    if "--dir" in flags and flags & {"--token-stdin", "--gh-token"}:
         unknown = unknown | {"--dir"}
     if "--help" in flags or unknown or len(args) != 1:
         if "--version" in flags and not args:
@@ -3105,6 +3128,8 @@ def main(argv):
     elif "--gh-token" in flags:
         token = gh_token()
     if "--agent" in flags:
+        if "--dir" in flags:
+            return agent_dir_main(args[0], values.get("--name"), values.get("--commit"))
         return agent_main(args[0], token)
     try:
         if "--dir" in flags:
@@ -3147,6 +3172,33 @@ def agent_main(target, token):
         out, code = agent_error("guard"), 1
     except Exception:  # any other failure text may quote the repository
         out, code = agent_error("scan-failed"), 1
+    print(json.dumps(out, ensure_ascii=True, indent=1))
+    return code
+
+
+def agent_dir_main(path, name, commit):
+    """--agent --dir: the agent summary for a local checkout. The label comes
+    only from --name and --commit, and only when both pass validation."""
+    try:
+        if name is not None:
+            ids = parse_repo_input(name)
+            name = f"{ids['owner']}/{ids['repo']}"
+        if commit is not None and not SHA40.match(commit):
+            raise ValueError()
+    except ValueError:
+        out, code = agent_error("invalid-dir-label"), 2
+    else:
+        try:
+            report = scan_dir(path, name, commit)
+            out = agent_report(report, full_report_command(None, local=True), {"name": name, "commit": commit})
+            code = 0
+        except ScanError as e:
+            unreadable = not os.path.isdir(path)
+            out, code = agent_error("dir-unreadable" if unreadable else "scan-failed"), 1
+        except AgentGuardError:
+            out, code = agent_error("guard"), 1
+        except Exception:  # any other failure text may quote the folder
+            out, code = agent_error("scan-failed"), 1
     print(json.dumps(out, ensure_ascii=True, indent=1))
     return code
 
