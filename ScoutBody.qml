@@ -77,6 +77,22 @@ ColumnLayout {
     return String(f.path).slice(0, 300) + (f.line ? ":" + Number(f.line) : "")
   }
 
+  // The GitHub page for a finding's file at the scanned commit, with the line
+  // when there is one. Built only for a GitHub scan, from a fixed prefix, a
+  // name and a commit hash that pass a strict pattern, and a path encoded
+  // segment by segment. A local scan gets no link, because the files on disk
+  // may differ from any commit.
+  function findingUrl(f) {
+    var r = view.scout.report
+    if (!r || !f || !f.path || view.cmp || (r.api && r.api.local)) return ""
+    var repo = String(r.repository), sha = String(r.commit), path = String(f.path)
+    if (!/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(repo) || !/^[0-9a-f]{40}$/.test(sha)) return ""
+    if (path.length > 1000 || path.split("/").indexOf("..") !== -1) return ""
+    var line = Number(f.line)
+    return "https://github.com/" + repo + "/blob/" + sha + "/" + path.split("/").map(encodeURIComponent).join("/")
+      + (line >= 1 && line <= 10000000 && Math.floor(line) === line ? "#L" + line : "")
+  }
+
   // A count with its severity, on a tint of that severity's colour.
   component Chip: Rectangle {
     id: chip
@@ -883,11 +899,22 @@ ColumnLayout {
                   Plain {
                     Layout.fillWidth: true
                     visible: text !== ""
+                    id: where
+                    readonly property string url: view.findingUrl(finding.modelData)
                     text: view.location(finding.modelData)
-                    color: view.foreground
-                    opacity: 0.6
+                    color: url !== "" ? view.accent : view.foreground
+                    opacity: url !== "" ? (whereArea.containsMouse ? 1.0 : 0.85) : 0.6
                     font.family: view.fontFamily
                     font.pixelSize: Style.font.bodySmall
+                    font.underline: url !== "" && whereArea.containsMouse
+                    MouseArea {
+                      id: whereArea
+                      anchors.fill: parent
+                      enabled: where.url !== ""
+                      hoverEnabled: true
+                      cursorShape: where.url !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: Qt.openUrlExternally(where.url)
+                    }
                   }
                 }
               }

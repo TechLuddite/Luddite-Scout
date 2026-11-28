@@ -202,6 +202,22 @@ class TerminalOutput(unittest.TestCase):
         for l in samples:
             self.assertTrue(all(0x20 <= ord(c) < 0x7F or c in "⟦⟧" for c in l), l)
 
+    def test_findings_link_to_the_file_and_line_on_github(self):
+        report = self.report()
+        report["checks"][0]["findings"] = [
+            {"severity": "low", "rule": "S6.husky", "title": "t", "path": "a b/c#d?.sh", "line": 7},
+            {"severity": "low", "rule": "S6.husky", "title": "t", "path": self.HOSTILE},
+            {"severity": "low", "rule": "S6.husky", "title": "t"}]
+        base = "https://github.com/o/r/blob/" + "a" * 40 + "/"
+        out = scout.format_text(report)
+        self.assertIn("\n         " + base + "a%20b/c%23d%3F.sh#L7\n", out)
+        links = [l.strip() for l in out.split("\n") if l.strip().startswith("https://")]
+        self.assertEqual(len(links), 2)
+        self.assertTrue(all(0x21 <= ord(c) < 0x7F for l in links for c in l), links)
+        for change in ({"commit": None}, {"repository": "o/r x"},
+                       {"api": {**report["api"], "local": True}}):
+            self.assertNotIn("https://github.com/", scout.format_text({**report, **change}))
+
     def test_error_message_is_escaped(self):
         self.assertEqual(scout.term_safe("a\x1bb\nc"), "a⟦U+001B⟧b⟦U+000A⟧c")
 
