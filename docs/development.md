@@ -29,3 +29,7 @@ The skill is built and released from [TechLuddite/luddite-scout-skill](https://g
 ## Continuous integration
 
 `.github/workflows/test.yml` runs `npm test` on every push to `main` and on every pull request, with read-only permissions.
+
+## README badges
+
+The badges in the README are SVG files in `docs/badges/`, written by `docs/badges/make.py`. A reader's browser fetches them from the same host as the README and from no badge service. The test badge is the one exception, and GitHub serves it. After changing the version in `manifest.json`, run `docs/badges/make.py`. `test/test_badges.py` fails when the files are out of date.
