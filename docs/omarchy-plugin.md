@@ -35,6 +35,8 @@ The second is the pacman packages you installed by name whose home page is a Git
 
 A package's files are not scanned or compared, because an installed package is a build and not a copy of its source. The list is read from the plain-text files under `/var/lib/pacman`, and pacman is not run. The list is read by `bin/scout --installed`, which reads the manifest and the `.git` folder of each plugin as plain files and does not run git.
 
+For a GitHub scan, the file and line under a finding is a link. A click opens that file on GitHub in your browser, at the scanned commit and on that line. Reports on an installed copy have no links, because the files on disk may not match any commit.
+
 The panel shows up to eight findings per check. The website or the terminal shows the rest. Open website, at the bottom of the panel, opens https://techluddite.github.io/Luddite-Scout/ in your browser.
 
 If you are signed in to the GitHub CLI (`gh auth login`), the panel uses that login, which raises GitHub's limit from 60 to 5,000 requests an hour. The token stays inside `bin/scout` and is sent only to `api.github.com`. Without a login the panel works anonymously.

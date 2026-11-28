@@ -29,7 +29,7 @@ A token never goes on the command line or into the environment, where other proc
 
 ## Output
 
-The readable report shows every finding with its file and line. Under each S3 finding in a file it lists up to ten of the hidden characters, with the line, the code point, the column and the surrounding text. In that text every character outside printable ASCII is written as a code point in brackets such as `⟦U+202E⟧`, so the terminal displays the line in stored order. The JSON report is capped at about 1.5 MB. The lowest-severity findings are dropped first, and the report says when that happened.
+The readable report shows every finding with its file and line. For a GitHub scan, the next line is the address of that file on GitHub at the scanned commit, ending in the line number when there is one. A local or AUR scan prints no address, because the files read may not match any commit. Under each S3 finding in a file it lists up to ten of the hidden characters, with the line, the code point, the column and the surrounding text. In that text every character outside printable ASCII is written as a code point in brackets such as `⟦U+202E⟧`, so the terminal displays the line in stored order. The JSON report is capped at about 1.5 MB. The lowest-severity findings are dropped first, and the report says when that happened.
 
 `--agent` prints a summary built only from fixed rule IDs and descriptions, severities, statuses, counts, the repository name and the commit hash. See [agent skill](agent-skill.md) for what it guarantees.
 

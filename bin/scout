@@ -46,7 +46,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 ALLOWED_HOSTS = {"api.github.com", "raw.githubusercontent.com", "api.osv.dev", "api.securityscorecards.dev", "aur.archlinux.org"}
 DEADLINE_SECONDS = 180
 API_MAX_BYTES = 8_000_000
@@ -2288,6 +2288,20 @@ def json_safe(out):
     return TERMINAL_UNSAFE.sub(lambda m: json.dumps(m.group(0))[1:-1], out)
 
 
+def finding_url(report, f):
+    """The GitHub page for a finding's file at the scanned commit, with the
+    line when there is one. None for a local or AUR scan, where the files
+    read may not match any commit on GitHub."""
+    owner, _, repo = str(report.get("repository")).partition("/")
+    commit, path = report.get("commit"), f.get("path")
+    if (report.get("api") or {}).get("local") or not path or not isinstance(commit, str) or not SHA40.match(commit) \
+            or not _safe_owner_repo(owner, repo):
+        return None
+    line = f.get("line")
+    anchor = f"#L{line}" if isinstance(line, int) and not isinstance(line, bool) and line >= 1 else ""
+    return f"https://github.com/{owner}/{repo}/blob/{commit}/{urllib.parse.quote(str(path), safe='/')}{anchor}"
+
+
 def format_text(report):
     aur = str(report["repository"]).startswith("aur/")
     out = [f"{report['repository']} at {report['commit'] or ('the Arch User Repository' if aur else 'a local checkout')}"]
@@ -2305,6 +2319,9 @@ def format_text(report):
         for f in c["findings"]:
             loc = f" [{f['path']}{':' + str(f['line']) if f.get('line') else ''}]" if f.get("path") else ""
             out.append(f"  {f['severity'].upper():6} {f['title']}{loc}")
+            url = finding_url(report, f)
+            if url:
+                out.append(f"         {url}")
             if str(f.get("rule", "")).startswith("S3."):
                 for smp in f.get("samples") or []:
                     out.append(f"         line {smp.get('line')}: {ascii_only(smp.get('text', ''))}")
