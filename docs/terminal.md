@@ -12,6 +12,7 @@ bin/scout --gh-token owner/repo                   # use the GitHub CLI's login f
 gh auth token | bin/scout --token-stdin owner/repo  # or pass any token on standard input
 bin/scout --dir PATH                              # scan a local checkout instead
 bin/scout --dir PATH --name owner/repo --commit SHA  # and label the report
+bin/scout --agent --dir PATH                      # agent summary of a local checkout
 ```
 
 The repository can be given as `owner/repo`, `github.com/owner/repo` or a full `https://github.com/` URL.
@@ -31,6 +32,8 @@ A token never goes on the command line or into the environment, where other proc
 The readable report shows every finding with its file and line. The JSON report is capped at about 1.5 MB. The lowest-severity findings are dropped first, and the report says when that happened.
 
 `--agent` prints a summary built only from fixed rule IDs and descriptions, severities, statuses, counts, the repository name and the commit hash. See [agent skill](agent-skill.md) for what it guarantees.
+
+`--agent --dir PATH` gives the same summary for a local checkout, so an agent can scan a folder again after a change. The report names the repository `local-checkout` with no commit, unless `--name owner/repo` and `--commit SHA` are given and valid. The folder path is never printed: the `full_report` command ends in the fixed word `PATH`. A missing folder returns the error code `dir-unreadable`, and a rejected label returns `invalid-dir-label`.
 
 ## Installed Omarchy plugins
 
