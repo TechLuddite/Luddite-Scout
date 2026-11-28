@@ -2277,6 +2277,13 @@ def term_safe(v):
     return TERMINAL_UNSAFE.sub(lambda m: "⟦%s⟧" % code_point(m.group(0)), str(v))
 
 
+def ascii_only(v):
+    """For S3 samples: every character outside printable ASCII is shown as
+    ⟦U+XXXX⟧, so the line cannot reorder, hide or restyle terminal output.
+    The two marker brackets that reveal() wrote are kept."""
+    return "".join(c if 0x20 <= ord(c) < 0x7F or c in "⟦⟧" else "⟦%s⟧" % code_point(c) for c in str(v))
+
+
 def json_safe(out):
     return TERMINAL_UNSAFE.sub(lambda m: json.dumps(m.group(0))[1:-1], out)
 
@@ -2298,6 +2305,9 @@ def format_text(report):
         for f in c["findings"]:
             loc = f" [{f['path']}{':' + str(f['line']) if f.get('line') else ''}]" if f.get("path") else ""
             out.append(f"  {f['severity'].upper():6} {f['title']}{loc}")
+            if str(f.get("rule", "")).startswith("S3."):
+                for smp in f.get("samples") or []:
+                    out.append(f"         line {smp.get('line')}: {ascii_only(smp.get('text', ''))}")
     api = report["api"]
     out.append("")
     if api.get("local"):

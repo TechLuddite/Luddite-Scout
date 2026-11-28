@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 import pathlib
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -185,6 +186,21 @@ class TerminalOutput(unittest.TestCase):
             ("U+00AD", "line-comment", 0), ("U+200B", "block-comment", 0), ("U+200B", "regex", 1), ("U+200F", "regex", 1),
             ("U+200E", "regex", 0), ("U+202E", "string", 0), ("U+2066", "string", 0), ("U+200D", "template", 0),
             ("U+200C", "regex", 0), ("U+2060", "code", 0)])
+
+    def test_s3_samples_are_printed_with_code_points_and_columns(self):
+        # A fullwidth letter stands for any other character outside ASCII.
+        body = 'ok = 1\nconst re = /[\u200b-\u200f]/;\nconst s = "a\u202eb\u2066c \uff21";\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            pathlib.Path(tmp, "a.js").write_text(body, encoding="utf-8")
+            out = scout.format_text(scout.scan_dir(tmp))
+        for line in ("line 2: U+200B col 14:", "line 2: U+200F col 16:", "line 3: U+202E col 13:", "line 3: U+2066 col 15:"):
+            self.assertIn(line, out)
+        self.assertIn('"a⟦U+202E⟧b⟦U+2066⟧c ⟦U+FF21⟧";', out)
+        self.assertIsNone(scout.TERMINAL_UNSAFE.search(out.replace("\n", "")))
+        samples = [l for l in out.split("\n") if l.startswith("         line ")]
+        self.assertEqual(len(samples), 4)
+        for l in samples:
+            self.assertTrue(all(0x20 <= ord(c) < 0x7F or c in "⟦⟧" for c in l), l)
 
     def test_error_message_is_escaped(self):
         self.assertEqual(scout.term_safe("a\x1bb\nc"), "a⟦U+001B⟧b⟦U+000A⟧c")
